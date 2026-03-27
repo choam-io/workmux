@@ -97,8 +97,10 @@ impl NsmuxBackend {
     /// Find a workspace ref by its title/name.
     fn find_workspace_ref_by_name(&self, name: &str) -> Result<Option<String>> {
         let workspaces = self.list_workspaces()?;
+        // Strip PUA chars from the search name to match how we clean workspace titles
+        let clean_name = Self::strip_pua(name);
         for (ref_id, title) in &workspaces {
-            if title == name {
+            if title == name || title == &clean_name || Self::strip_pua(title) == clean_name {
                 return Ok(Some(ref_id.clone()));
             }
         }
@@ -142,6 +144,21 @@ impl NsmuxBackend {
             }
         }
         None
+    }
+
+    /// Strip Private Use Area (nerdfont) characters from a string.
+    /// nsmux's native macOS sidebar can't render these glyphs.
+    fn strip_pua(s: &str) -> String {
+        s.chars()
+            .filter(|c| {
+                let cp = *c as u32;
+                !((0xE000..=0xF8FF).contains(&cp) ||
+                  (0xF0000..=0xFFFFF).contains(&cp) ||
+                  (0x100000..=0x10FFFF).contains(&cp))
+            })
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 
     /// Resolve a surface ref to its containing pane ref and workspace ref.
@@ -258,9 +275,22 @@ impl Multiplexer for NsmuxBackend {
         let ws_ref = Self::parse_ok_ref(&output)
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Rename the workspace to the prefixed name
+        // Strip Private Use Area characters from the name -- nsmux's native
+        // macOS sidebar can't render nerdfont glyphs (they show as boxes).
+        let clean_name = prefixed_name.chars()
+            .filter(|c| {
+                let cp = *c as u32;
+                // Filter out PUA ranges used by Nerd Fonts
+                !((0xE000..=0xF8FF).contains(&cp) ||
+                  (0xF0000..=0xFFFFF).contains(&cp) ||
+                  (0x100000..=0x10FFFF).contains(&cp))
+            })
+            .collect::<String>();
+        let clean_name = clean_name.trim();
+
+        // Rename the workspace to the cleaned name
         let _ = self.cmux_cmd(&[
-            "rename-workspace", "--workspace", &ws_ref, &prefixed_name,
+            "rename-workspace", "--workspace", &ws_ref, clean_name,
         ]);
 
         // Query the initial surface inside this workspace.
@@ -363,7 +393,10 @@ impl Multiplexer for NsmuxBackend {
 
     fn window_exists_by_full_name(&self, full_name: &str) -> Result<bool> {
         let workspaces = self.list_workspaces()?;
-        Ok(workspaces.iter().any(|(_, title)| title == full_name))
+        let clean = Self::strip_pua(full_name);
+        Ok(workspaces.iter().any(|(_, title)| {
+            title == full_name || title == &clean || Self::strip_pua(title) == clean
+        }))
     }
 
     fn current_window_name(&self) -> Result<Option<String>> {
