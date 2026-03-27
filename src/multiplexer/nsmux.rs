@@ -12,8 +12,9 @@
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cmd::Cmd;
 use crate::config::SplitDirection;
@@ -24,13 +25,37 @@ use super::types::*;
 use super::util;
 use super::{Multiplexer, PaneHandshake};
 
+/// Cached tree output to avoid repeated `cmux tree --all` queries.
+/// Expires after a short TTL so the dashboard stays responsive.
+struct TreeCache {
+    output: String,
+    fetched_at: Instant,
+}
+
+const TREE_CACHE_TTL: Duration = Duration::from_secs(2);
+
 /// nsmux backend implementation.
-#[derive(Debug, Default)]
-pub struct NsmuxBackend;
+pub struct NsmuxBackend {
+    tree_cache: Mutex<Option<TreeCache>>,
+}
+
+impl std::fmt::Debug for NsmuxBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NsmuxBackend").finish()
+    }
+}
+
+impl Default for NsmuxBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl NsmuxBackend {
     pub fn new() -> Self {
-        Self
+        Self {
+            tree_cache: Mutex::new(None),
+        }
     }
 
     /// Run a cmux CLI command, returning an error with context on failure.
@@ -125,10 +150,31 @@ impl NsmuxBackend {
         None
     }
 
+    /// Get cached tree output, refreshing if stale.
+    fn cached_tree(&self) -> Option<String> {
+        {
+            let cache = self.tree_cache.lock().ok()?;
+            if let Some(ref cached) = *cache {
+                if cached.fetched_at.elapsed() < TREE_CACHE_TTL {
+                    return Some(cached.output.clone());
+                }
+            }
+        }
+        // Cache miss or stale -- fetch fresh
+        let output = self.cmux_query(&["tree", "--all"]).ok()?;
+        if let Ok(mut cache) = self.tree_cache.lock() {
+            *cache = Some(TreeCache {
+                output: output.clone(),
+                fetched_at: Instant::now(),
+            });
+        }
+        Some(output)
+    }
+
     /// Resolve which workspace a surface belongs to by parsing `cmux tree --all`.
     /// Returns None if the surface isn't found (caller should proceed without --workspace).
     fn workspace_for_surface(&self, surface_ref: &str) -> Option<String> {
-        let output = self.cmux_query(&["tree", "--all"]).ok()?;
+        let output = self.cached_tree()?;
         let mut current_ws: Option<String> = None;
         for line in output.lines() {
             let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
@@ -163,9 +209,9 @@ impl NsmuxBackend {
 
     /// Resolve a surface ref to its containing pane ref and workspace ref.
     fn resolve_pane_and_workspace(&self, surface_ref: &str) -> (Option<String>, Option<String>) {
-        let output = match self.cmux_query(&["tree", "--all"]) {
-            Ok(o) => o,
-            Err(_) => return (None, None),
+        let output = match self.cached_tree() {
+            Some(o) => o,
+            None => return (None, None),
         };
         let mut current_ws: Option<String> = None;
         let mut current_pane: Option<String> = None;
@@ -691,7 +737,51 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn get_all_live_pane_info(&self) -> Result<HashMap<String, LivePaneInfo>> {
-        // Return empty for now -- reconciliation will fall back to per-pane queries
-        Ok(HashMap::new())
+        // Parse tree --all to build a map of all terminal surfaces.
+        // This gives the dashboard reconciliation proper data to work with.
+        let output = self.cached_tree()
+            .ok_or_else(|| anyhow!("Failed to get tree output"))?;
+
+        let mut result = HashMap::new();
+        let mut _current_ws: Option<String> = None;
+        let mut current_ws_title: Option<String> = None;
+
+        for line in output.lines() {
+            let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+
+            if let Some(rest) = trimmed.strip_prefix("workspace ") {
+                let parts: Vec<&str> = rest.splitn(2, '"').collect();
+                if let Some(ws) = parts[0].split_whitespace().next() {
+                    if ws.starts_with("workspace:") {
+                        _current_ws = Some(ws.to_string());
+                        // Extract title from quoted string
+                        if parts.len() > 1 {
+                            current_ws_title = parts[1].split('"').next().map(|s| s.to_string());
+                        }
+                    }
+                }
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("surface ") {
+                if rest.contains("[terminal]") {
+                    if let Some(ref_str) = rest.split_whitespace().next() {
+                        if ref_str.starts_with("surface:") {
+                            result.insert(ref_str.to_string(), LivePaneInfo {
+                                pid: None,
+                                current_command: None,
+                                working_dir: PathBuf::from(
+                                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+                                ),
+                                title: None,
+                                session: None,
+                                window: current_ws_title.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
