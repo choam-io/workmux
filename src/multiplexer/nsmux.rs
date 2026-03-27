@@ -54,7 +54,9 @@ impl NsmuxBackend {
     fn parse_ok_ref(output: &str) -> Option<String> {
         let trimmed = output.trim();
         if trimmed.starts_with("OK ") {
-            Some(trimmed[3..].trim().to_string())
+            // Extract just the first ref token (e.g. "surface:34" from "OK surface:34 workspace:18")
+            let after_ok = trimmed[3..].trim();
+            Some(after_ok.split_whitespace().next().unwrap_or(after_ok).to_string())
         } else if trimmed == "OK" {
             None
         } else {
@@ -71,13 +73,22 @@ impl NsmuxBackend {
             if trimmed.is_empty() {
                 continue;
             }
-            // Output format: "workspace:<N>  <title>"
-            // or structured -- we'll parse what we get
-            let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+            // Output format: "[* ]workspace:<N>  <title>  [selected]"
+            // Strip leading selection marker and trailing [selected] tag
+            let clean = trimmed.trim_start_matches('*').trim();
+            let clean = if let Some(idx) = clean.rfind("[selected]") {
+                clean[..idx].trim()
+            } else {
+                clean
+            };
+            // Now: "workspace:<N>  <title>"
+            let parts: Vec<&str> = clean.splitn(2, char::is_whitespace).collect();
             if parts.len() >= 2 {
-                workspaces.push((parts[0].trim().to_string(), parts[1].trim().to_string()));
-            } else if !trimmed.is_empty() {
-                workspaces.push((trimmed.to_string(), trimmed.to_string()));
+                let ref_id = parts[0].trim().to_string();
+                let title = parts[1].trim().to_string();
+                if ref_id.starts_with("workspace:") {
+                    workspaces.push((ref_id, title));
+                }
             }
         }
         Ok(workspaces)
@@ -131,6 +142,53 @@ impl NsmuxBackend {
             }
         }
         None
+    }
+
+    /// Resolve a surface ref to its containing pane ref and workspace ref.
+    fn resolve_pane_and_workspace(&self, surface_ref: &str) -> (Option<String>, Option<String>) {
+        let output = match self.cmux_query(&["tree", "--all"]) {
+            Ok(o) => o,
+            Err(_) => return (None, None),
+        };
+        let mut current_ws: Option<String> = None;
+        let mut current_pane: Option<String> = None;
+        for line in output.lines() {
+            let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+            if let Some(rest) = trimmed.strip_prefix("workspace ") {
+                if let Some(ws) = rest.split_whitespace().next() {
+                    if ws.starts_with("workspace:") {
+                        current_ws = Some(ws.to_string());
+                    }
+                }
+            }
+            if let Some(rest) = trimmed.strip_prefix("pane ") {
+                if let Some(p) = rest.split_whitespace().next() {
+                    if p.starts_with("pane:") {
+                        current_pane = Some(p.to_string());
+                    }
+                }
+            }
+            if trimmed.contains(surface_ref) {
+                return (current_pane, current_ws);
+            }
+        }
+        (None, None)
+    }
+
+    /// Build cmux command args with --workspace if the surface is in a non-current workspace.
+    fn cmux_surface_cmd(&self, base_cmd: &str, pane_id: &str, extra_args: &[&str]) -> Result<()> {
+        let mut args = vec![base_cmd.to_string()];
+        if let Some(ws) = self.workspace_for_surface(pane_id) {
+            args.push("--workspace".to_string());
+            args.push(ws);
+        }
+        args.push("--surface".to_string());
+        args.push(pane_id.to_string());
+        for arg in extra_args {
+            args.push(arg.to_string());
+        }
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.cmux_cmd(&refs)
     }
 }
 
@@ -374,12 +432,24 @@ impl Multiplexer for NsmuxBackend {
     // === Pane Management ===
 
     fn select_pane(&self, pane_id: &str) -> Result<()> {
-        self.cmux_cmd(&["focus-pane", "--pane", pane_id])
+        // workmux passes surface refs as pane_ids. Resolve to actual pane ref.
+        let (pane_ref, ws_ref) = self.resolve_pane_and_workspace(pane_id);
+        let actual_pane = pane_ref.as_deref().unwrap_or(pane_id);
+        let mut args = vec!["focus-pane".to_string(), "--pane".to_string(), actual_pane.to_string()];
+        if let Some(ws) = ws_ref {
+            args.push("--workspace".to_string());
+            args.push(ws);
+        }
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.cmux_cmd(&refs)
     }
 
     fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
-        // nsmux can focus a pane directly across workspaces
-        self.cmux_cmd(&["focus-pane", "--pane", pane_id])
+        // Also select the workspace so it becomes visible
+        if let Some(ws) = self.workspace_for_surface(pane_id) {
+            let _ = self.cmux_cmd(&["select-workspace", "--workspace", &ws]);
+        }
+        self.select_pane(pane_id)
     }
 
     fn kill_pane(&self, pane_id: &str) -> Result<()> {
@@ -390,22 +460,39 @@ impl Multiplexer for NsmuxBackend {
         let _cwd_str = cwd.to_str()
             .ok_or_else(|| anyhow!("cwd contains non-UTF8 characters"))?;
 
-        let mut args = vec!["respawn-pane", "--surface", pane_id];
+        // Resolve the workspace for this surface (same issue as split_pane --
+        // cmux scopes surface lookup to the selected workspace by default).
+        let workspace_ref = self.workspace_for_surface(pane_id);
+
+        let mut args = vec!["respawn-pane".to_string(), "--surface".to_string(), pane_id.to_string()];
+        if let Some(ws) = &workspace_ref {
+            args.push("--workspace".to_string());
+            args.push(ws.clone());
+        }
         if let Some(command) = cmd {
-            args.push("--command");
-            args.push(command);
+            args.push("--command".to_string());
+            args.push(command.to_string());
         }
 
-        self.cmux_cmd(&args)?;
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.cmux_cmd(&args_refs)?;
         // Return the same pane ID since respawn reuses the surface
         Ok(pane_id.to_string())
     }
 
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String> {
         let lines_str = lines.to_string();
-        self.cmux_query(&[
-            "read-screen", "--surface", pane_id, "--lines", &lines_str,
-        ]).ok()
+        let mut args = vec!["read-screen".to_string()];
+        if let Some(ws) = self.workspace_for_surface(pane_id) {
+            args.push("--workspace".to_string());
+            args.push(ws);
+        }
+        args.push("--surface".to_string());
+        args.push(pane_id.to_string());
+        args.push("--lines".to_string());
+        args.push(lines_str);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.cmux_query(&refs).ok()
     }
 
     // === Text I/O ===
@@ -413,28 +500,27 @@ impl Multiplexer for NsmuxBackend {
     fn send_keys(&self, pane_id: &str, command: &str) -> Result<()> {
         // cmux send appends \n by default when text ends with it
         let text = format!("{}\\n", command);
-        self.cmux_cmd(&["send", "--surface", pane_id, &text])
+        self.cmux_surface_cmd("send", pane_id, &[&text])
     }
 
     fn send_keys_to_agent(&self, pane_id: &str, command: &str, agent: Option<&str>) -> Result<()> {
         if agent::resolve_profile(agent).needs_bang_delay() && command.starts_with('!') {
             // Send ! first
-            self.cmux_cmd(&["send", "--surface", pane_id, "!"])?;
+            self.cmux_surface_cmd("send", pane_id, &["!"])?;
             thread::sleep(Duration::from_millis(50));
             let rest = format!("{}\\n", &command[1..]);
-            self.cmux_cmd(&["send", "--surface", pane_id, &rest])
+            self.cmux_surface_cmd("send", pane_id, &[&rest])
         } else {
             self.send_keys(pane_id, command)
         }
     }
 
     fn send_key(&self, pane_id: &str, key: &str) -> Result<()> {
-        self.cmux_cmd(&["send-key", "--surface", pane_id, key])
+        self.cmux_surface_cmd("send-key", pane_id, &[key])
     }
 
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()> {
-        // Use cmux send for multiline content
-        self.cmux_cmd(&["send", "--surface", pane_id, content])
+        self.cmux_surface_cmd("send", pane_id, &[content])
     }
 
     // === Shell ===
@@ -512,10 +598,45 @@ impl Multiplexer for NsmuxBackend {
         let surface_ref = Self::parse_ok_ref(&output)
             .unwrap_or_else(|| "unknown".to_string());
 
-        // If a command was specified, send it to the new pane
+        // If a command was specified, send it to the new pane.
+        // The new surface starts a fresh shell which needs time to initialize.
+        // Poll read-screen until the shell has produced output (prompt ready),
+        // then send the command.
         if let Some(cmd) = command {
-            let _ = self.cmux_cmd(&["send", "--surface", &surface_ref, cmd]);
-            let _ = self.cmux_cmd(&["send-key", "--surface", &surface_ref, "Enter"]);
+            let mut send_args = vec!["send", "--surface", &surface_ref];
+            let ws_holder;
+            if let Some(ws) = &workspace_ref {
+                ws_holder = ws.clone();
+                send_args.insert(1, "--workspace");
+                send_args.insert(2, &ws_holder);
+            }
+
+            // Wait for shell to be ready (up to 3 seconds)
+            for _ in 0..30 {
+                let mut screen_args = vec!["read-screen", "--surface", &surface_ref, "--lines", "5"];
+                if let Some(ws) = &workspace_ref {
+                    screen_args.insert(1, "--workspace");
+                    screen_args.insert(2, ws);
+                }
+                if let Ok(screen) = self.cmux_query(&screen_args) {
+                    let trimmed = screen.trim();
+                    if !trimmed.is_empty() {
+                        break;
+                    }
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+
+            send_args.push(cmd);
+            let _ = self.cmux_cmd(&send_args);
+
+            let mut key_args = vec!["send-key", "--surface", &surface_ref];
+            if let Some(ws) = &workspace_ref {
+                key_args.insert(1, "--workspace");
+                key_args.insert(2, ws);
+            }
+            key_args.push("Enter");
+            let _ = self.cmux_cmd(&key_args);
         }
 
         Ok(surface_ref)
