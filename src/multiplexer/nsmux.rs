@@ -275,22 +275,9 @@ impl Multiplexer for NsmuxBackend {
         let ws_ref = Self::parse_ok_ref(&output)
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Strip Private Use Area characters from the name -- nsmux's native
-        // macOS sidebar can't render nerdfont glyphs (they show as boxes).
-        let clean_name = prefixed_name.chars()
-            .filter(|c| {
-                let cp = *c as u32;
-                // Filter out PUA ranges used by Nerd Fonts
-                !((0xE000..=0xF8FF).contains(&cp) ||
-                  (0xF0000..=0xFFFFF).contains(&cp) ||
-                  (0x100000..=0x10FFFF).contains(&cp))
-            })
-            .collect::<String>();
-        let clean_name = clean_name.trim();
-
-        // Rename the workspace to the cleaned name
+        // Rename the workspace to the prefixed name
         let _ = self.cmux_cmd(&[
-            "rename-workspace", "--workspace", &ws_ref, clean_name,
+            "rename-workspace", "--workspace", &ws_ref, &prefixed_name,
         ]);
 
         // Query the initial surface inside this workspace.
