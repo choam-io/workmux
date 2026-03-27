@@ -93,6 +93,24 @@ impl NsmuxBackend {
         }
         Ok(None)
     }
+
+    /// Get the initial surface ref inside a workspace via `cmux tree`.
+    fn get_initial_surface(&self, ws_ref: &str) -> Option<String> {
+        let output = self.cmux_query(&["tree", "--workspace", ws_ref]).ok()?;
+        // Parse tree output for "surface surface:<N>"
+        for line in output.lines() {
+            let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+            if let Some(rest) = trimmed.strip_prefix("surface ") {
+                // Extract "surface:<N>" from "surface surface:<N> [terminal] ..."
+                if let Some(ref_str) = rest.split_whitespace().next() {
+                    if ref_str.starts_with("surface:") {
+                        return Some(ref_str.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Multiplexer for NsmuxBackend {
@@ -166,14 +184,13 @@ impl Multiplexer for NsmuxBackend {
             "rename-workspace", "--workspace", &ws_ref, &prefixed_name,
         ]);
 
-        // Get the initial surface ID for this workspace
-        let _surfaces = self.cmux_query(&[
-            "identify", "--workspace", &ws_ref,
-        ]).unwrap_or_default();
+        // Query the initial surface inside this workspace.
+        // workmux uses the returned ID for split_pane/send_keys/etc which
+        // need a surface ref, not a workspace ref.
+        let surface_ref = self.get_initial_surface(&ws_ref)
+            .unwrap_or_else(|| ws_ref.clone());
 
-        // Return the workspace ref as the "pane_id" for workmux
-        // nsmux returns workspace refs like "workspace:1"
-        Ok(ws_ref)
+        Ok(surface_ref)
     }
 
     fn create_session(&self, params: CreateSessionParams) -> Result<String> {
