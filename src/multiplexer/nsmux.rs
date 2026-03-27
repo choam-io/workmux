@@ -111,6 +111,27 @@ impl NsmuxBackend {
         }
         None
     }
+
+    /// Resolve which workspace a surface belongs to by parsing `cmux tree --all`.
+    /// Returns None if the surface isn't found (caller should proceed without --workspace).
+    fn workspace_for_surface(&self, surface_ref: &str) -> Option<String> {
+        let output = self.cmux_query(&["tree", "--all"]).ok()?;
+        let mut current_ws: Option<String> = None;
+        for line in output.lines() {
+            let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+            if let Some(rest) = trimmed.strip_prefix("workspace ") {
+                if let Some(ws) = rest.split_whitespace().next() {
+                    if ws.starts_with("workspace:") {
+                        current_ws = Some(ws.to_string());
+                    }
+                }
+            }
+            if trimmed.contains(surface_ref) {
+                return current_ws;
+            }
+        }
+        None
+    }
 }
 
 impl Multiplexer for NsmuxBackend {
@@ -471,13 +492,23 @@ impl Multiplexer for NsmuxBackend {
         let _cwd_str = cwd.to_str()
             .ok_or_else(|| anyhow!("cwd contains non-UTF8 characters"))?;
 
-        // cmux new-split creates a split and returns a surface ref
-        let args = vec![
-            "new-split", dir_str,
-            "--surface", target_pane_id,
-        ];
+        // Resolve the workspace for this surface. cmux new-split scopes surface
+        // lookup to the *selected* workspace by default, which fails when the
+        // target surface lives in a newly-created (non-selected) workspace.
+        let workspace_ref = self.workspace_for_surface(target_pane_id);
 
-        let output = self.cmux_query(&args)?;
+        // cmux new-split creates a split and returns a surface ref
+        let mut args = vec![
+            "new-split".to_string(), dir_str.to_string(),
+            "--surface".to_string(), target_pane_id.to_string(),
+        ];
+        if let Some(ws) = &workspace_ref {
+            args.push("--workspace".to_string());
+            args.push(ws.clone());
+        }
+
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = self.cmux_query(&args_refs)?;
         let surface_ref = Self::parse_ok_ref(&output)
             .unwrap_or_else(|| "unknown".to_string());
 
