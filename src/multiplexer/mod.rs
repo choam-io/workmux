@@ -7,6 +7,7 @@ pub mod agent;
 pub mod handle;
 pub mod handshake;
 pub mod kitty;
+pub mod nsmux;
 pub mod tmux;
 pub mod types;
 pub mod util;
@@ -567,10 +568,15 @@ pub fn detect_backend() -> BackendType {
             Ok(bt) => return bt,
             Err(_) => {
                 eprintln!(
-                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij"
+                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij|nsmux"
                 );
             }
         }
+    }
+
+    // Check nsmux first -- if we're inside nsmux, CMUX_WORKSPACE_ID is set
+    if std::env::var("CMUX_WORKSPACE_ID").is_ok() {
+        return BackendType::Nsmux;
     }
 
     resolve_backend(
@@ -609,6 +615,7 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
         BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
         BackendType::Zellij => Arc::new(zellij::ZellijBackend::new()),
+        BackendType::Nsmux => Arc::new(nsmux::NsmuxBackend::new()),
     }
 }
 
