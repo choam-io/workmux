@@ -1825,7 +1825,7 @@ impl Config {
         if let Some(ref prefix) = self.window_prefix {
             prefix
         } else if nerdfont::is_enabled() {
-            "\u{f418} " // nf-oct-git_branch
+            "\u{f418}  " // nf-oct-git_branch + double space for sidebar readability
         } else {
             "wm-"
         }
