@@ -47,7 +47,8 @@ impl App {
                 .unwrap_or(0);
             self.agents.retain(|agent| {
                 agent
-                    .status_ts
+                    .updated_ts
+                    .or(agent.status_ts)
                     .map(|ts| now.saturating_sub(ts) <= threshold)
                     .unwrap_or(true)
             });
@@ -122,7 +123,8 @@ impl App {
         // Helper closure to get status priority (lower = higher priority)
         let get_priority = |agent: &AgentPane| -> u8 {
             let is_stale = agent
-                .status_ts
+                .updated_ts
+                .or(agent.status_ts)
                 .map(|ts| now.saturating_sub(ts) > stale_threshold)
                 .unwrap_or(false);
 
@@ -384,7 +386,10 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        agent::is_stale(agent.status_ts, self.stale_threshold_secs, now)
+        // Use updated_ts (refreshed on every state persist) for staleness,
+        // falling back to status_ts (only changes on status transitions).
+        let ts = agent.updated_ts.or(agent.status_ts);
+        agent::is_stale(ts, self.stale_threshold_secs, now)
     }
 
     pub fn get_elapsed(&self, agent: &AgentPane) -> Option<u64> {
