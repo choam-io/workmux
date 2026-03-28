@@ -1069,7 +1069,7 @@ impl Multiplexer for NsmuxBackend {
 
                                 result.insert(surface_ref, LivePaneInfo {
                                     pid: None,
-                                    current_command: title.clone(), // Use title as command proxy for agent detection
+                                    current_command: None, // nsmux doesn't expose process info
                                     working_dir: PathBuf::from("/"),
                                     title,
                                     session: None,
