@@ -212,6 +212,16 @@ pub trait Multiplexer: Send + Sync {
     /// Send a single key to a pane
     fn send_key(&self, pane_id: &str, key: &str) -> Result<()>;
 
+    /// Send raw text to a pane (no newline appended).
+    /// Used for batched character input from the dashboard.
+    fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        // Default: send each char as a key (backends can override for efficiency)
+        for c in text.chars() {
+            self.send_key(pane_id, &c.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Paste multiline content to a pane (using bracketed paste)
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()>;
 

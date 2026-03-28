@@ -58,6 +58,9 @@ pub struct App {
     preview_pane_id: Option<String>,
     /// Input mode: keystrokes are sent directly to the selected agent's pane
     pub input_mode: bool,
+    /// Buffered text for input mode -- flushed once per event loop iteration
+    /// to avoid spawning a subprocess per keystroke.
+    pub input_buffer: String,
     /// Manual scroll offset for the preview (None = auto-scroll to bottom)
     pub preview_scroll: Option<u16>,
     /// Number of lines in the current preview content
@@ -208,6 +211,7 @@ impl App {
             preview: None,
             preview_pane_id: None,
             input_mode: false,
+            input_buffer: String::new(),
             preview_scroll: None,
             preview_line_count: 0,
             preview_height: 0,
