@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{debug, info};
 use std::sync::{Arc, Mutex};
 
 use crate::git;
@@ -116,6 +117,12 @@ impl App {
         }
 
         if repo_branches.is_empty() {
+            debug!(
+                agents = self.all_agents.len(),
+                git_statuses = self.git_statuses.len(),
+                repo_roots = self.repo_roots.len(),
+                "pr_fetch: no branches found, skipping"
+            );
             self.is_pr_fetching.store(false, Ordering::SeqCst);
             // Return false so the caller doesn't reset the timer — no fetch
             // was actually started, and we want to retry once git statuses
@@ -125,6 +132,10 @@ impl App {
 
         let tx = self.event_tx.clone();
         let is_fetching = self.is_pr_fetching.clone();
+
+        for (repo, branches) in &repo_branches {
+            info!(repo = %repo.display(), branches = ?branches, "pr_fetch: will query");
+        }
 
         // Identify the priority repo (current project) so it fetches first
         let priority_repo = self
@@ -170,6 +181,12 @@ impl App {
                             };
                             match crate::github::list_prs_for_branches(&repo_root, &branches) {
                                 Ok(prs) => {
+                                    info!(
+                                        repo = %repo_root.display(),
+                                        prs_found = prs.len(),
+                                        branches = ?branches,
+                                        "pr_fetch: completed"
+                                    );
                                     let _ = tx.send(AppEvent::PrStatus(repo_root, prs));
                                 }
                                 Err(e) => {

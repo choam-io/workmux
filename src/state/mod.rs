@@ -7,6 +7,7 @@ pub mod run;
 pub(crate) mod store;
 mod types;
 
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
@@ -78,7 +79,15 @@ pub fn persist_agent_update(
 
     let state = AgentState {
         pane_key,
-        workdir: live_info.working_dir,
+        // Prefer the live pane's working_dir if it looks like a real path.
+        // nsmux can't report surface CWD, so get_live_pane_info falls back
+        // to "/" or the workmux process CWD. When called from set-window-status
+        // (inside pi), std::env::current_dir() is the agent's actual CWD.
+        workdir: if live_info.working_dir == PathBuf::from("/") {
+            std::env::current_dir().unwrap_or(live_info.working_dir)
+        } else {
+            live_info.working_dir
+        },
         status: final_status,
         status_ts: Some(status_ts),
         pane_title,
