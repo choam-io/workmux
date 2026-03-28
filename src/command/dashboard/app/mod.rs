@@ -8,6 +8,8 @@ mod preview;
 mod types;
 mod worktrees;
 
+use tracing::{debug, info};
+
 pub use types::*;
 
 use anyhow::Result;
@@ -288,6 +290,8 @@ impl App {
             .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))
             .unwrap_or_default();
 
+        debug!(agents = self.all_agents.len(), "refresh: loaded agents");
+
         // Cache repo roots for ALL agents before filtering (project picker needs all projects)
         let paths_to_resolve: Vec<PathBuf> = self
             .all_agents
@@ -313,6 +317,7 @@ impl App {
 
             for (path, root) in results {
                 if let Some(r) = root {
+                    debug!(path = %path.display(), root = %r.display(), "refresh: resolved repo_root");
                     self.repo_roots.insert(path, r);
                 }
             }

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 use crate::cmd::Cmd;
 use crate::config::SplitDirection;
@@ -99,6 +100,7 @@ impl NsmuxBackend {
         // Connect if not connected
         if guard.is_none() {
             let path = Self::socket_path();
+            debug!(path = %path.display(), "nsmux: connecting query socket");
             let stream = UnixStream::connect(&path)
                 .with_context(|| format!("failed to connect to nsmux socket at {:?}", path))?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -981,6 +983,7 @@ impl Multiplexer for NsmuxBackend {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        debug!(surfaces = live_panes.len(), "nsmux: discover_agents scanning surfaces");
         for (surface_ref, info) in &live_panes {
             // Check if title indicates a pi session (π prefix)
             let is_agent = info.title.as_ref()
@@ -1000,6 +1003,7 @@ impl Multiplexer for NsmuxBackend {
                 continue;
             }
 
+            info!(surface = %surface_ref, title = ?info.title, "nsmux: discovered agent session without state");
             // Create state for this discovered agent
             let state = AgentState {
                 pane_key,
@@ -1111,6 +1115,10 @@ impl Multiplexer for NsmuxBackend {
             }
         }
 
+        debug!(surfaces = result.len(), "nsmux: get_all_live_pane_info");
+        for (ref_str, info) in &result {
+            debug!(surface = %ref_str, title = ?info.title, "nsmux: live surface");
+        }
         Ok(result)
     }
 }
