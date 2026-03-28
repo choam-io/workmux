@@ -4,7 +4,34 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use tracing::debug;
+
+/// Resolve the `gh` CLI binary path once and cache it.
+/// Checks PATH first, then common Homebrew locations (macOS GUI apps
+/// often lack /opt/homebrew/bin in PATH).
+fn gh_bin() -> &'static str {
+    static GH: OnceLock<String> = OnceLock::new();
+    GH.get_or_init(|| {
+        // Check PATH first
+        if Command::new("gh").arg("--version").output().is_ok() {
+            return "gh".to_string();
+        }
+        // Homebrew on Apple Silicon
+        let candidates = [
+            "/opt/homebrew/bin/gh",
+            "/usr/local/bin/gh",
+        ];
+        for path in candidates {
+            if std::path::Path::new(path).exists() {
+                tracing::info!(path, "gh: resolved from fallback location");
+                return path.to_string();
+            }
+        }
+        // Last resort -- hope it's somewhere
+        "gh".to_string()
+    })
+}
 
 #[derive(Debug, Deserialize)]
 pub struct PrDetails {
@@ -267,7 +294,7 @@ struct PrListResult {
 pub fn find_pr_by_head_ref(owner: &str, branch: &str) -> Result<Option<PrSummary>> {
     // gh pr list --head only matches branch name, not owner:branch format
     // So we query by branch and filter by owner in the results
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin())
         .args([
             "pr",
             "list",
@@ -346,7 +373,7 @@ pub fn list_open_prs(repo_root: &Path) -> Result<Vec<PrListEntry>> {
         author: Author,
     }
 
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin())
         .current_dir(repo_root)
         .args([
             "pr",
@@ -392,7 +419,7 @@ pub fn list_open_prs(repo_root: &Path) -> Result<Vec<PrListEntry>> {
 pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
     // Fetch PR details using gh CLI
     // Note: We don't pre-check with 'which' because it doesn't respect test PATH modifications
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin())
         .args([
             "pr",
             "view",
@@ -450,7 +477,7 @@ struct PrBatchItem {
 
 /// Fetch all PRs for the current repository.
 pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin())
         .args([
             "pr",
             "list",
@@ -671,7 +698,7 @@ struct RepoContext {
 /// This delegates repo resolution to `gh` so it works correctly with forks,
 /// `gh repo set-default`, and GitHub Enterprise.
 fn get_repo_context(repo_root: &Path) -> Result<(String, String, String)> {
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin())
         .current_dir(repo_root)
         .args(["repo", "view", "--json", "owner,name,url"])
         .output()
@@ -729,7 +756,7 @@ fn list_prs_for_branches_graphql(
     }))
     .context("JSON serialize")?;
 
-    let mut child = Command::new("gh")
+    let mut child = Command::new(gh_bin())
         .current_dir(repo_root)
         .args(["api", "graphql", "--hostname", &hostname, "--input", "-"])
         .stdin(Stdio::piped())
@@ -821,7 +848,7 @@ fn list_prs_for_branches_rest(
     let mut map = HashMap::new();
 
     for branch in branches {
-        let output = match Command::new("gh")
+        let output = match Command::new(gh_bin())
             .current_dir(repo_root)
             .args([
                 "pr",
