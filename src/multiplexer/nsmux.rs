@@ -11,6 +11,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
@@ -37,6 +39,15 @@ const TREE_CACHE_TTL: Duration = Duration::from_secs(2);
 /// nsmux backend implementation.
 pub struct NsmuxBackend {
     tree_cache: Mutex<Option<TreeCache>>,
+    /// Persistent socket connection for fast send_text / send_key.
+    /// Wrapped in Mutex<Option<>> so we can reconnect on failure.
+    socket: Mutex<Option<SocketConn>>,
+}
+
+/// A buffered Unix socket connection to nsmux.
+struct SocketConn {
+    writer: UnixStream,
+    reader: BufReader<UnixStream>,
 }
 
 impl std::fmt::Debug for NsmuxBackend {
@@ -55,7 +66,75 @@ impl NsmuxBackend {
     pub fn new() -> Self {
         Self {
             tree_cache: Mutex::new(None),
+            socket: Mutex::new(None),
         }
+    }
+
+    /// Get the nsmux socket path.
+    fn socket_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home)
+            .join("Library/Application Support/nsmux/nsmux.sock")
+    }
+
+    /// Send a v2 JSON command over the persistent socket.
+    /// Returns the parsed response or an error.
+    fn socket_send(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let mut guard = self.socket.lock().unwrap();
+
+        // Connect if not connected
+        if guard.is_none() {
+            let path = Self::socket_path();
+            let stream = UnixStream::connect(&path)
+                .with_context(|| format!("failed to connect to nsmux socket at {:?}", path))?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let reader = BufReader::new(stream.try_clone()?);
+            *guard = Some(SocketConn {
+                writer: stream,
+                reader,
+            });
+        }
+
+        let conn = guard.as_mut().unwrap();
+        let request = serde_json::json!({
+            "method": method,
+            "params": params,
+        });
+        let mut line = serde_json::to_string(&request)?;
+        line.push('\n');
+
+        // Write request
+        if let Err(e) = conn.writer.write_all(line.as_bytes()) {
+            // Connection broken, drop it so we reconnect next time
+            *guard = None;
+            return Err(e.into());
+        }
+
+        // Read response
+        let mut response_line = String::new();
+        if let Err(e) = conn.reader.read_line(&mut response_line) {
+            *guard = None;
+            return Err(e.into());
+        }
+
+        let resp: serde_json::Value = serde_json::from_str(&response_line)?;
+        if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            Ok(resp)
+        } else {
+            let msg = resp
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            Err(anyhow!("nsmux socket: {}", msg))
+        }
+    }
+
+    /// Fire-and-forget a v2 JSON command over the socket.
+    /// Ignores errors (for input mode responsiveness).
+    fn socket_fire(&self, method: &str, params: &serde_json::Value) {
+        let _ = self.socket_send(method, params);
     }
 
     /// Resolve a surface UUID (from $CMUX_SURFACE_ID) to a `surface:N` ref.
@@ -610,13 +689,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn send_key(&self, pane_id: &str, key: &str) -> Result<()> {
-        // Fire-and-forget so the dashboard event loop stays responsive.
-        // The previous synchronous impl blocked on every keystroke in
-        // input mode, causing freezes and crashes under rapid typing.
-        //
-        // cmux send-key only accepts named keys (enter, esc, ctrl+c) and
-        // single alpha chars. For everything else (numbers, punctuation,
-        // spaces) use cmux send which accepts arbitrary text.
+        // Use socket for zero-fork overhead.
         let is_named_key = matches!(
             key,
             "Enter" | "backspace" | "Tab" | "Up" | "Down" | "Left" | "Right"
@@ -627,51 +700,25 @@ impl Multiplexer for NsmuxBackend {
             || key.starts_with("shift+");
 
         if is_named_key {
-            // Use send-key for named/modifier keys
-            if let Some(ws) = self.workspace_for_surface(pane_id) {
-                let owned_args: Vec<String> = vec![
-                    "send-key".into(),
-                    "--workspace".into(), ws,
-                    "--surface".into(), pane_id.into(),
-                    key.into(),
-                ];
-                let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
-                self.cmux_fire(&refs);
-            } else {
-                self.cmux_fire(&["send-key", "--surface", pane_id, key]);
-            }
+            self.socket_fire(
+                "surface.send_key",
+                &serde_json::json!({"surface": pane_id, "key": key}),
+            );
         } else {
-            // Use send for text characters (cmux send-key rejects most non-alpha)
-            if let Some(ws) = self.workspace_for_surface(pane_id) {
-                let owned_args: Vec<String> = vec![
-                    "send".into(),
-                    "--workspace".into(), ws,
-                    "--surface".into(), pane_id.into(),
-                    key.into(),
-                ];
-                let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
-                self.cmux_fire(&refs);
-            } else {
-                self.cmux_fire(&["send", "--surface", pane_id, key]);
-            }
+            self.socket_fire(
+                "surface.send_text",
+                &serde_json::json!({"surface": pane_id, "text": key}),
+            );
         }
         Ok(())
     }
 
     fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
-        // Single fire-and-forget cmux send for the entire text batch.
-        if let Some(ws) = self.workspace_for_surface(pane_id) {
-            let owned_args: Vec<String> = vec![
-                "send".into(),
-                "--workspace".into(), ws,
-                "--surface".into(), pane_id.into(),
-                text.into(),
-            ];
-            let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
-            self.cmux_fire(&refs);
-        } else {
-            self.cmux_fire(&["send", "--surface", pane_id, text]);
-        }
+        // Single socket call for the entire text batch.
+        self.socket_fire(
+            "surface.send_text",
+            &serde_json::json!({"surface": pane_id, "text": text}),
+        );
         Ok(())
     }
 
