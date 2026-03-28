@@ -39,9 +39,10 @@ const TREE_CACHE_TTL: Duration = Duration::from_secs(2);
 /// nsmux backend implementation.
 pub struct NsmuxBackend {
     tree_cache: Mutex<Option<TreeCache>>,
-    /// Persistent socket connection for fast send_text / send_key.
-    /// Wrapped in Mutex<Option<>> so we can reconnect on failure.
-    socket: Mutex<Option<SocketConn>>,
+    /// Blocking socket for queries (capture_pane, etc.)
+    query_socket: Mutex<Option<SocketConn>>,
+    /// Non-blocking socket for fire-and-forget input (send_text, send_key)
+    input_socket: Mutex<Option<SocketConn>>,
 }
 
 /// A buffered Unix socket connection to nsmux.
@@ -66,7 +67,8 @@ impl NsmuxBackend {
     pub fn new() -> Self {
         Self {
             tree_cache: Mutex::new(None),
-            socket: Mutex::new(None),
+            query_socket: Mutex::new(None),
+            input_socket: Mutex::new(None),
         }
     }
 
@@ -77,10 +79,10 @@ impl NsmuxBackend {
             .join("Library/Application Support/nsmux/nsmux.sock")
     }
 
-    /// Send a v2 JSON command over the persistent socket.
+    /// Send a v2 JSON command over the blocking query socket.
     /// Returns the parsed response or an error.
     fn socket_send(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
-        let mut guard = self.socket.lock().unwrap();
+        let mut guard = self.query_socket.lock().unwrap();
 
         // Connect if not connected
         if guard.is_none() {
@@ -132,9 +134,49 @@ impl NsmuxBackend {
     }
 
     /// Fire-and-forget a v2 JSON command over the socket.
-    /// Ignores errors (for input mode responsiveness).
+    /// Writes the command but doesn't block waiting for the response.
+    /// Stale responses are drained on the next call.
     fn socket_fire(&self, method: &str, params: &serde_json::Value) {
-        let _ = self.socket_send(method, params);
+        let mut guard = self.input_socket.lock().unwrap();
+
+        // Connect if not connected
+        if guard.is_none() {
+            let path = Self::socket_path();
+            match UnixStream::connect(&path) {
+                Ok(stream) => {
+                    // Non-blocking reads so we never stall draining responses
+                    let _ = stream.set_nonblocking(true);
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let reader = BufReader::new(stream.try_clone().unwrap());
+                    *guard = Some(SocketConn { writer: stream, reader });
+                }
+                Err(_) => return,
+            }
+        }
+
+        let conn = guard.as_mut().unwrap();
+
+        // Drain any pending responses from previous fire-and-forget calls
+        let mut drain_buf = String::new();
+        loop {
+            match conn.reader.read_line(&mut drain_buf) {
+                Ok(0) => { *guard = None; return; } // EOF, connection closed
+                Ok(_) => { drain_buf.clear(); continue; }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => { *guard = None; return; }
+            }
+        }
+
+        let request = serde_json::json!({
+            "method": method,
+            "params": params,
+        });
+        let mut line = serde_json::to_string(&request).unwrap();
+        line.push('\n');
+
+        if conn.writer.write_all(line.as_bytes()).is_err() {
+            *guard = None;
+        }
     }
 
     /// Resolve a surface UUID (from $CMUX_SURFACE_ID) to a `surface:N` ref.
@@ -666,18 +708,19 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String> {
-        let lines_str = lines.to_string();
-        let mut args = vec!["read-screen".to_string()];
-        if let Some(ws) = self.workspace_for_surface(pane_id) {
-            args.push("--workspace".to_string());
-            args.push(ws);
-        }
-        args.push("--surface".to_string());
-        args.push(pane_id.to_string());
-        args.push("--lines".to_string());
-        args.push(lines_str);
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        self.cmux_query(&refs).ok()
+        // Use v2 socket protocol to avoid spawning a subprocess.
+        let resp = self.socket_send(
+            "surface.read_text",
+            &serde_json::json!({
+                "surface": pane_id,
+                "lines": lines,
+                "scrollback": true,
+            }),
+        ).ok()?;
+        resp.get("result")
+            .and_then(|r| r.get("text"))
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
     }
 
     // === Text I/O ===
