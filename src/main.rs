@@ -27,15 +27,32 @@ use tracing::{error, info};
 
 fn main() -> Result<()> {
     logger::init()?;
-    info!(args = ?std::env::args().collect::<Vec<_>>(), "workmux start");
+
+    // Build a root span with nsmux correlation context.
+    // These env vars are set by nsmux for every terminal surface.
+    let surface_id = std::env::var("CMUX_SURFACE_ID").unwrap_or_default();
+    let workspace_id = std::env::var("CMUX_WORKSPACE_ID").unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    let _root = tracing::info_span!(
+        "workmux",
+        surface = %surface_id,
+        workspace = %workspace_id,
+        cwd = %cwd,
+    )
+    .entered();
+
+    info!(args = ?std::env::args().collect::<Vec<_>>(), "start");
 
     match cli::run() {
         Ok(result) => {
-            info!("workmux finished successfully");
+            info!("finished");
             Ok(result)
         }
         Err(err) => {
-            error!(error = ?err, "workmux failed");
+            error!(error = ?err, "failed");
             Err(err)
         }
     }

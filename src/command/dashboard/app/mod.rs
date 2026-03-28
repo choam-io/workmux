@@ -281,6 +281,7 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
+        let _span = tracing::info_span!("dashboard_refresh").entered();
         // Discover agent sessions that might not have state files yet
         // (e.g. idle sessions that haven't fired events since restart).
         let _ = self.mux.discover_agents();

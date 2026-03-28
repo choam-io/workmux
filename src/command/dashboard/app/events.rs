@@ -34,6 +34,11 @@ impl App {
                 }
             }
             AppEvent::PrStatus(repo_root, prs) => {
+                info!(
+                    repo = %repo_root.display(),
+                    prs = prs.len(),
+                    "event: PrStatus received"
+                );
                 // Clear stale state when a repo has no PRs, otherwise update
                 if prs.is_empty() {
                     self.pr_statuses.remove(&repo_root);

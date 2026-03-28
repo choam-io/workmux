@@ -55,6 +55,7 @@ impl App {
     /// Spawn a background thread to fetch PR status for all repos.
     /// Returns true if a fetch was started, false if one is already in progress.
     pub(super) fn spawn_pr_status_fetch(&self) -> bool {
+        let _span = tracing::info_span!("pr_status_fetch").entered();
         // Skip if already fetching
         if self
             .is_pr_fetching
