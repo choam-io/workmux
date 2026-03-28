@@ -122,7 +122,7 @@ fn dashboard_input_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Esc => Some(Action::ExitInputMode),
         KeyCode::Enter => Some(Action::SendKey("Enter".to_string())),
-        KeyCode::Backspace => Some(Action::SendKey("BSpace".to_string())),
+        KeyCode::Backspace => Some(Action::SendKey("backspace".to_string())),
         KeyCode::Tab => Some(Action::SendKey("Tab".to_string())),
         KeyCode::Up => Some(Action::SendKey("Up".to_string())),
         KeyCode::Down => Some(Action::SendKey("Down".to_string())),
