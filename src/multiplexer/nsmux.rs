@@ -613,21 +613,47 @@ impl Multiplexer for NsmuxBackend {
         // Fire-and-forget so the dashboard event loop stays responsive.
         // The previous synchronous impl blocked on every keystroke in
         // input mode, causing freezes and crashes under rapid typing.
-        let mut args = vec!["send-key"];
-        if let Some(ws) = self.workspace_for_surface(pane_id) {
-            // workspace_for_surface returns an owned String; we need
-            // to keep it alive for the spawn call, so build owned args.
-            let owned_args: Vec<String> = vec![
-                "send-key".into(),
-                "--workspace".into(), ws,
-                "--surface".into(), pane_id.into(),
-                key.into(),
-            ];
-            let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
-            self.cmux_fire(&refs);
+        //
+        // cmux send-key only accepts named keys (enter, esc, ctrl+c) and
+        // single alpha chars. For everything else (numbers, punctuation,
+        // spaces) use cmux send which accepts arbitrary text.
+        let is_named_key = matches!(
+            key,
+            "Enter" | "backspace" | "Tab" | "Up" | "Down" | "Left" | "Right"
+                | "Escape" | "Space" | "Home" | "End" | "pageup" | "pagedown"
+                | "Delete" | "escape" | "enter" | "space" | "tab"
+        ) || key.starts_with("ctrl+")
+            || key.starts_with("alt+")
+            || key.starts_with("shift+");
+
+        if is_named_key {
+            // Use send-key for named/modifier keys
+            if let Some(ws) = self.workspace_for_surface(pane_id) {
+                let owned_args: Vec<String> = vec![
+                    "send-key".into(),
+                    "--workspace".into(), ws,
+                    "--surface".into(), pane_id.into(),
+                    key.into(),
+                ];
+                let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
+                self.cmux_fire(&refs);
+            } else {
+                self.cmux_fire(&["send-key", "--surface", pane_id, key]);
+            }
         } else {
-            args.extend_from_slice(&["--surface", pane_id, key]);
-            self.cmux_fire(&args);
+            // Use send for text characters (cmux send-key rejects most non-alpha)
+            if let Some(ws) = self.workspace_for_surface(pane_id) {
+                let owned_args: Vec<String> = vec![
+                    "send".into(),
+                    "--workspace".into(), ws,
+                    "--surface".into(), pane_id.into(),
+                    key.into(),
+                ];
+                let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
+                self.cmux_fire(&refs);
+            } else {
+                self.cmux_fire(&["send", "--surface", pane_id, key]);
+            }
         }
         Ok(())
     }
