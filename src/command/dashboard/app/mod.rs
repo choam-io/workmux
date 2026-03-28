@@ -279,6 +279,10 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
+        // Discover agent sessions that might not have state files yet
+        // (e.g. idle sessions that haven't fired events since restart).
+        let _ = self.mux.discover_agents();
+
         // Load agents from StateStore with reconciliation against live pane state
         self.all_agents = StateStore::new()
             .and_then(|store| store.load_reconciled_agents(self.mux.as_ref()))

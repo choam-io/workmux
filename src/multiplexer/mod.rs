@@ -568,6 +568,14 @@ pub trait Multiplexer: Send + Sync {
             Some(_) => Ok(true), // Valid
         }
     }
+
+    /// Discover agent sessions that don't have state files yet.
+    /// Called by the dashboard before loading state to ensure idle
+    /// agents are visible. Default is no-op; backends override to
+    /// scan for agent signatures (e.g. title patterns).
+    fn discover_agents(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Detect which backend to use based on environment.
