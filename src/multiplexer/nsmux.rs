@@ -43,6 +43,10 @@ pub struct NsmuxBackend {
     query_socket: Mutex<Option<SocketConn>>,
     /// Non-blocking socket for fire-and-forget input (send_text, send_key)
     input_socket: Mutex<Option<SocketConn>>,
+    /// Mapping from surface:N refs to UUIDs. The v2 socket API resolves
+    /// surface:N refs relative to the current workspace, so we need UUIDs
+    /// to target surfaces in other workspaces.
+    surface_uuids: Mutex<HashMap<String, String>>,
 }
 
 /// A buffered Unix socket connection to nsmux.
@@ -69,6 +73,7 @@ impl NsmuxBackend {
             tree_cache: Mutex::new(None),
             query_socket: Mutex::new(None),
             input_socket: Mutex::new(None),
+            surface_uuids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -77,6 +82,13 @@ impl NsmuxBackend {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(home)
             .join("Library/Application Support/nsmux/nsmux.sock")
+    }
+
+    /// Resolve a surface:N ref to its UUID for v2 API calls.
+    /// The v2 API resolves surface:N relative to the current workspace,
+    /// so cross-workspace operations need the UUID.
+    fn surface_uuid(&self, surface_ref: &str) -> Option<String> {
+        self.surface_uuids.lock().unwrap().get(surface_ref).cloned()
     }
 
     /// Send a v2 JSON command over the blocking query socket.
@@ -708,15 +720,18 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String> {
-        // Use v2 socket protocol to avoid spawning a subprocess.
-        let resp = self.socket_send(
-            "surface.read_text",
-            &serde_json::json!({
-                "surface": pane_id,
-                "lines": lines,
-                "scrollback": true,
-            }),
-        ).ok()?;
+        // Use surface UUID for cross-workspace correctness.
+        // surface:N refs are workspace-relative in the v2 API.
+        let mut params = serde_json::json!({
+            "lines": lines,
+            "scrollback": true,
+        });
+        if let Some(uuid) = self.surface_uuid(pane_id) {
+            params["surface_id"] = serde_json::Value::String(uuid);
+        } else {
+            params["surface"] = serde_json::Value::String(pane_id.to_string());
+        }
+        let resp = self.socket_send("surface.read_text", &params).ok()?;
         resp.get("result")
             .and_then(|r| r.get("text"))
             .and_then(|t| t.as_str())
@@ -733,6 +748,13 @@ impl Multiplexer for NsmuxBackend {
 
     fn send_key(&self, pane_id: &str, key: &str) -> Result<()> {
         // Use socket for zero-fork overhead.
+        // Resolve to UUID for cross-workspace correctness.
+        let surface_param = if let Some(uuid) = self.surface_uuid(pane_id) {
+            serde_json::json!({"surface_id": uuid})
+        } else {
+            serde_json::json!({"surface": pane_id})
+        };
+
         let is_named_key = matches!(
             key,
             "Enter" | "backspace" | "Tab" | "Up" | "Down" | "Left" | "Right"
@@ -743,25 +765,25 @@ impl Multiplexer for NsmuxBackend {
             || key.starts_with("shift+");
 
         if is_named_key {
-            self.socket_fire(
-                "surface.send_key",
-                &serde_json::json!({"surface": pane_id, "key": key}),
-            );
+            let mut params = surface_param;
+            params["key"] = serde_json::Value::String(key.to_string());
+            self.socket_fire("surface.send_key", &params);
         } else {
-            self.socket_fire(
-                "surface.send_text",
-                &serde_json::json!({"surface": pane_id, "text": key}),
-            );
+            let mut params = surface_param;
+            params["text"] = serde_json::Value::String(key.to_string());
+            self.socket_fire("surface.send_text", &params);
         }
         Ok(())
     }
 
     fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
-        // Single socket call for the entire text batch.
-        self.socket_fire(
-            "surface.send_text",
-            &serde_json::json!({"surface": pane_id, "text": text}),
-        );
+        let mut params = if let Some(uuid) = self.surface_uuid(pane_id) {
+            serde_json::json!({"surface_id": uuid})
+        } else {
+            serde_json::json!({"surface": pane_id})
+        };
+        params["text"] = serde_json::Value::String(text.to_string());
+        self.socket_fire("surface.send_text", &params);
         Ok(())
     }
 
@@ -1066,6 +1088,13 @@ impl Multiplexer for NsmuxBackend {
                                     _ => continue,
                                 };
                                 let title = surface.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
+                                let uuid = surface.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
+
+                                // Cache the UUID for cross-workspace v2 API calls
+                                if let Some(ref uuid) = uuid {
+                                    self.surface_uuids.lock().unwrap()
+                                        .insert(surface_ref.clone(), uuid.clone());
+                                }
 
                                 result.insert(surface_ref, LivePaneInfo {
                                     pid: None,
