@@ -418,6 +418,20 @@ pub trait Multiplexer: Send + Sync {
                 };
 
                 let _ = self.clear_pane(&spawned_id);
+
+                // After handshake + clear, verify the shell prompt is visible before
+                // sending the command. Protects against the race where handshake signals
+                // before the exec'd shell finishes loading (especially on nsmux where
+                // respawn_pane is not a real process replacement).
+                for _ in 0..30 {
+                    if let Some(screen) = self.capture_pane(&spawned_id, 5) {
+                        if !screen.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
                 self.send_keys(&spawned_id, &final_command)?;
 
                 // Set working status for agent panes with injected prompts

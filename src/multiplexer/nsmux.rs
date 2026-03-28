@@ -20,7 +20,7 @@ use crate::cmd::Cmd;
 use crate::config::SplitDirection;
 
 use super::agent;
-use super::handshake::UnixPipeHandshake;
+use super::handshake::NoopHandshake;
 use super::types::*;
 use super::util;
 use super::{Multiplexer, PaneHandshake};
@@ -522,27 +522,32 @@ impl Multiplexer for NsmuxBackend {
         self.cmux_cmd(&["close-surface", "--surface", pane_id])
     }
 
-    fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String> {
-        let _cwd_str = cwd.to_str()
-            .ok_or_else(|| anyhow!("cwd contains non-UTF8 characters"))?;
-
-        // Resolve the workspace for this surface (same issue as split_pane --
-        // cmux scopes surface lookup to the selected workspace by default).
+    fn respawn_pane(&self, pane_id: &str, _cwd: &Path, _cmd: Option<&str>) -> Result<String> {
+        // nsmux's `respawn-pane` is just `surface.send_text` -- it types text into
+        // the existing shell rather than killing and restarting the process like tmux.
+        // The handshake script would arrive before the shell prompt is ready, causing
+        // the FIFO pipe to never be written and the handshake to time out.
+        //
+        // Instead, we skip the respawn entirely. The shell spawned by `new-workspace`
+        // is already a login shell. We just wait for it to finish loading (prompt ready)
+        // by polling read-screen, then return. The caller will send_keys afterwards.
         let workspace_ref = self.workspace_for_surface(pane_id);
 
-        let mut args = vec!["respawn-pane".to_string(), "--surface".to_string(), pane_id.to_string()];
-        if let Some(ws) = &workspace_ref {
-            args.push("--workspace".to_string());
-            args.push(ws.clone());
-        }
-        if let Some(command) = cmd {
-            args.push("--command".to_string());
-            args.push(command.to_string());
+        for _ in 0..50 {
+            let mut screen_args = vec!["read-screen", "--surface", pane_id, "--lines", "5"];
+            if let Some(ws) = &workspace_ref {
+                screen_args.insert(1, "--workspace");
+                screen_args.insert(2, ws);
+            }
+            if let Ok(screen) = self.cmux_query(&screen_args) {
+                let trimmed = screen.trim();
+                if !trimmed.is_empty() {
+                    return Ok(pane_id.to_string());
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
         }
 
-        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        self.cmux_cmd(&args_refs)?;
-        // Return the same pane ID since respawn reuses the surface
         Ok(pane_id.to_string())
     }
 
@@ -596,7 +601,10 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn create_handshake(&self) -> Result<Box<dyn PaneHandshake>> {
-        Ok(Box::new(UnixPipeHandshake::new()?))
+        // nsmux's respawn_pane polls read-screen for shell readiness instead of
+        // using a FIFO handshake (see respawn_pane comment). Return a no-op
+        // handshake so the caller's wait() returns immediately.
+        Ok(Box::new(NoopHandshake))
     }
 
     // === Status ===
@@ -717,22 +725,43 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
-        // Use cmux tree to get pane info
-        let output = self.cmux_query(&["identify", "--surface", pane_id]);
-        match output {
-            Ok(_text) => {
-                Ok(Some(LivePaneInfo {
-                    pid: None,
-                    current_command: None,
-                    working_dir: PathBuf::from(
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-                    ),
-                    title: None,
-                    session: None,
-                    window: None,
-                }))
+        // Use cmux identify to check if the surface exists.
+        // For unknown UUIDs, identify returns caller.surface_ref: null.
+        let output = match self.cmux_query(&["identify", "--surface", pane_id]) {
+            Ok(text) => text,
+            Err(_) => return Ok(None),
+        };
+
+        // Parse JSON and check if the surface was actually resolved
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output) {
+            let caller_ref = parsed
+                .get("caller")
+                .and_then(|c| c.get("surface_ref"))
+                .and_then(|v| v.as_str());
+            if caller_ref.is_none() {
+                // Surface UUID not found -- pane no longer exists
+                return Ok(None);
             }
-            Err(_) => Ok(None),
+
+            let title = parsed
+                .get("caller")
+                .and_then(|c| c.get("workspace_ref"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            Ok(Some(LivePaneInfo {
+                pid: None,
+                current_command: None,
+                working_dir: PathBuf::from(
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+                ),
+                title,
+                session: None,
+                window: None,
+            }))
+        } else {
+            // Couldn't parse -- assume the surface doesn't exist
+            Ok(None)
         }
     }
 
