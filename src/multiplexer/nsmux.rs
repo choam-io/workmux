@@ -932,6 +932,16 @@ impl Multiplexer for NsmuxBackend {
             .unwrap_or_else(|_| "nsmux-default".to_string())
     }
 
+    fn server_boot_id(&self) -> Result<Option<String>> {
+        // Use the socket file's inode as a boot ID. The inode changes
+        // every time nsmux restarts (new socket file). This lets us
+        // detect stale state files from previous nsmux sessions.
+        let path = Self::socket_path();
+        let metadata = std::fs::metadata(&path)?;
+        use std::os::unix::fs::MetadataExt;
+        Ok(Some(metadata.ino().to_string()))
+    }
+
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
         // Use cmux identify to check if the surface exists.
         // For unknown UUIDs, identify returns caller.surface_ref: null.
