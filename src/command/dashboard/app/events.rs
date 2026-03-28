@@ -1,5 +1,7 @@
 //! Event dispatching for background events.
 
+use std::time::Duration;
+
 use super::App;
 use super::types::{AppEvent, PrListState};
 
@@ -10,7 +12,19 @@ impl App {
         match event {
             AppEvent::Terminal(_) => {} // handled separately in main loop
             AppEvent::GitStatus(path, status) => {
+                let had_branch = self.git_statuses.get(&path)
+                    .and_then(|s| s.branch.as_ref()).is_some();
+                let has_branch = status.branch.is_some();
                 self.git_statuses.insert(path, status);
+                // Trigger PR fetch when we first learn about a branch
+                // (the initial PR fetch fires before git statuses arrive)
+                if !had_branch && has_branch
+                    && self.last_pr_fetch.elapsed() >= Duration::from_secs(2)
+                {
+                    if self.spawn_pr_status_fetch() {
+                        self.last_pr_fetch = std::time::Instant::now();
+                    }
+                }
             }
             AppEvent::PrStatus(repo_root, prs) => {
                 // Clear stale state when a repo has no PRs, otherwise update
