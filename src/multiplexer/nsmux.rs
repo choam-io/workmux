@@ -95,6 +95,7 @@ impl NsmuxBackend {
     /// Send a v2 JSON command over the blocking query socket.
     /// Returns the parsed response or an error.
     fn socket_send(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let _span = tracing::debug_span!("socket_send", method).entered();
         let mut guard = self.query_socket.lock().unwrap();
 
         // Connect if not connected
@@ -722,6 +723,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String> {
+        let _span = tracing::debug_span!("capture_pane", pane = %pane_id, lines).entered();
         // Use surface UUID for cross-workspace correctness.
         // surface:N refs are workspace-relative in the v2 API.
         let mut params = serde_json::json!({
@@ -967,6 +969,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn discover_agents(&self) -> Result<()> {
+        let _span = tracing::info_span!("discover_agents").entered();
         // Scan all surfaces for agent signatures (π in title = pi session).
         // Create state files for any that don't have one yet, so idle
         // agents appear in the dashboard immediately.

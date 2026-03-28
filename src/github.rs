@@ -782,7 +782,7 @@ fn list_prs_for_branches_graphql(
     }
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
-    tracing::info!(
+    tracing::debug!(
         repo = %repo_root.display(),
         stdout_len = stdout_str.len(),
         stdout_preview = %&stdout_str[..stdout_str.len().min(500)],

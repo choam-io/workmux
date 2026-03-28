@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::ValueEnum;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::multiplexer::{AgentStatus, create_backend, detect_backend};
@@ -30,6 +30,8 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     let Some(pane_id) = mux.current_pane_id() else {
         return Ok(());
     };
+
+    info!(pane = %pane_id, cmd = ?cmd, "set_window_status");
 
     match cmd {
         SetWindowStatusCommand::Clear => {

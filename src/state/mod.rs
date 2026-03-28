@@ -10,7 +10,7 @@ mod types;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::multiplexer::{AgentStatus, Multiplexer};
 
@@ -98,6 +98,14 @@ pub fn persist_agent_update(
         session_name: live_info.session,
         boot_id,
     };
+
+    info!(
+        pane = %state.pane_key.pane_id,
+        workdir = %state.workdir.display(),
+        status = ?state.status,
+        title = ?state.pane_title,
+        "persist_agent_update"
+    );
 
     if let Ok(store) = StateStore::new()
         && let Err(e) = store.upsert_agent(&state)
