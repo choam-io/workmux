@@ -344,8 +344,10 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
                 app.flush_input_buffer();
                 app.send_key_to_selected(&key);
             }
-            app.refresh_preview();
-            true // Signal that preview was refreshed
+            // Don't refresh preview on every keystroke -- the periodic
+            // refresh (100ms in input mode) handles it. Per-key refresh
+            // was calling capture_pane (subprocess) on every char.
+            false
         }
 
         // Diff view
