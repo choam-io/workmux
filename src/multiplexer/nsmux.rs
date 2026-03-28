@@ -86,6 +86,20 @@ impl NsmuxBackend {
         Ok(())
     }
 
+    /// Fire-and-forget a cmux CLI command (non-blocking).
+    ///
+    /// Used for send_key / send_keys so the dashboard event loop isn't
+    /// blocked waiting for each subprocess to finish.
+    fn cmux_fire(&self, args: &[&str]) {
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new("cmux");
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = cmd.spawn(); // intentionally ignore result
+    }
+
     /// Run a cmux CLI command and capture stdout.
     fn cmux_query(&self, args: &[&str]) -> Result<String> {
         Cmd::new("cmux")
@@ -595,6 +609,29 @@ impl Multiplexer for NsmuxBackend {
         self.cmux_surface_cmd("send", pane_id, &[&text])
     }
 
+    fn send_key(&self, pane_id: &str, key: &str) -> Result<()> {
+        // Fire-and-forget so the dashboard event loop stays responsive.
+        // The previous synchronous impl blocked on every keystroke in
+        // input mode, causing freezes and crashes under rapid typing.
+        let mut args = vec!["send-key"];
+        if let Some(ws) = self.workspace_for_surface(pane_id) {
+            // workspace_for_surface returns an owned String; we need
+            // to keep it alive for the spawn call, so build owned args.
+            let owned_args: Vec<String> = vec![
+                "send-key".into(),
+                "--workspace".into(), ws,
+                "--surface".into(), pane_id.into(),
+                key.into(),
+            ];
+            let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
+            self.cmux_fire(&refs);
+        } else {
+            args.extend_from_slice(&["--surface", pane_id, key]);
+            self.cmux_fire(&args);
+        }
+        Ok(())
+    }
+
     fn send_keys_to_agent(&self, pane_id: &str, command: &str, agent: Option<&str>) -> Result<()> {
         if agent::resolve_profile(agent).needs_bang_delay() && command.starts_with('!') {
             // Send ! first
@@ -605,10 +642,6 @@ impl Multiplexer for NsmuxBackend {
         } else {
             self.send_keys(pane_id, command)
         }
-    }
-
-    fn send_key(&self, pane_id: &str, key: &str) -> Result<()> {
-        self.cmux_surface_cmd("send-key", pane_id, &[key])
     }
 
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()> {
