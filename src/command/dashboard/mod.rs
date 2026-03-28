@@ -210,6 +210,9 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool, session_filter: bool) 
                 while let Ok(event) = event_rx.try_recv() {
                     handle_event(&mut app, event, &mut last_preview_refresh);
                 }
+
+                // Flush buffered input text (one cmux send for the whole burst)
+                app.flush_input_buffer();
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

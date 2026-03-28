@@ -369,11 +369,33 @@ impl App {
     }
 
     /// Send a key to the selected agent's pane
+    /// Send a single named key (Enter, backspace, etc.) to the selected agent's pane.
     pub fn send_key_to_selected(&self, key: &str) {
         if let Some(selected) = self.table_state.selected()
             && let Some(agent) = self.agents.get(selected)
         {
             let _ = self.mux.send_key(&agent.pane_id, key);
+        }
+    }
+
+    /// Send buffered text to the selected agent's pane in one shot.
+    pub fn send_text_to_selected(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(selected) = self.table_state.selected()
+            && let Some(agent) = self.agents.get(selected)
+        {
+            let _ = self.mux.send_text(&agent.pane_id, text);
+        }
+    }
+
+    /// Flush the input buffer -- sends accumulated text chars as one cmux send.
+    pub fn flush_input_buffer(&mut self) {
+        if !self.input_buffer.is_empty() {
+            let text = self.input_buffer.clone();
+            self.send_text_to_selected(&text);
+            self.input_buffer.clear();
         }
     }
 

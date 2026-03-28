@@ -173,6 +173,7 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::ExitInputMode => {
+            app.flush_input_buffer();
             app.input_mode = false;
             false
         }
@@ -333,7 +334,16 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
 
         // Input mode
         Action::SendKey(key) => {
-            app.send_key_to_selected(&key);
+            // Single-char text goes into the buffer (flushed once per
+            // event-loop iteration to avoid one subprocess per keystroke).
+            // Named keys (Enter, backspace, etc.) flush the buffer first
+            // then send immediately.
+            if key.len() == 1 && key.chars().next().map_or(false, |c| !c.is_control()) {
+                app.input_buffer.push_str(&key);
+            } else {
+                app.flush_input_buffer();
+                app.send_key_to_selected(&key);
+            }
             app.refresh_preview();
             true // Signal that preview was refreshed
         }

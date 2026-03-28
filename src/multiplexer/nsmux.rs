@@ -658,6 +658,23 @@ impl Multiplexer for NsmuxBackend {
         Ok(())
     }
 
+    fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        // Single fire-and-forget cmux send for the entire text batch.
+        if let Some(ws) = self.workspace_for_surface(pane_id) {
+            let owned_args: Vec<String> = vec![
+                "send".into(),
+                "--workspace".into(), ws,
+                "--surface".into(), pane_id.into(),
+                text.into(),
+            ];
+            let refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
+            self.cmux_fire(&refs);
+        } else {
+            self.cmux_fire(&["send", "--surface", pane_id, text]);
+        }
+        Ok(())
+    }
+
     fn send_keys_to_agent(&self, pane_id: &str, command: &str, agent: Option<&str>) -> Result<()> {
         if agent::resolve_profile(agent).needs_bang_delay() && command.starts_with('!') {
             // Send ! first
