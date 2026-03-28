@@ -186,9 +186,16 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool, session_filter: bool) 
     let preview_refresh_interval_normal = Duration::from_millis(500);
     let preview_refresh_interval_input = Duration::from_millis(100);
     let mut last_preview_refresh = std::time::Instant::now();
+    let mut needs_redraw = true;
 
     loop {
-        terminal.draw(|f| ui(f, &mut app))?;
+        // In input mode, skip redraws unless something changed (preview
+        // refresh, mode exit, etc.). The dashboard UI doesn't change on
+        // individual keystrokes -- they go to the agent pane.
+        if needs_redraw || !app.input_mode {
+            terminal.draw(|f| ui(f, &mut app))?;
+            needs_redraw = false;
+        }
 
         // Calculate timeout: wake for the earliest timer deadline
         let current_preview_interval = if app.input_mode {
@@ -204,11 +211,15 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool, session_filter: bool) 
         // Block until an event arrives OR the timeout fires
         match event_rx.recv_timeout(timeout) {
             Ok(event) => {
-                handle_event(&mut app, event, &mut last_preview_refresh);
+                if handle_event(&mut app, event, &mut last_preview_refresh) {
+                    needs_redraw = true;
+                }
 
                 // Drain any other pending events to coalesce bursts
                 while let Ok(event) = event_rx.try_recv() {
-                    handle_event(&mut app, event, &mut last_preview_refresh);
+                    if handle_event(&mut app, event, &mut last_preview_refresh) {
+                        needs_redraw = true;
+                    }
                 }
 
                 // Flush buffered input text (one cmux send for the whole burst)
@@ -222,12 +233,14 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool, session_filter: bool) 
             last_tick = std::time::Instant::now();
             // Advance spinner animation frame (wrap at frame count to avoid skip artifact)
             app.spinner_frame = (app.spinner_frame + 1) % SPINNER_FRAME_COUNT;
+            needs_redraw = true;
         }
 
         // Auto-refresh agent list every 2 seconds
         if last_refresh.elapsed() >= refresh_interval {
             app.refresh();
             last_refresh = std::time::Instant::now();
+            needs_redraw = true;
         }
 
         // Auto-refresh preview more frequently for live updates
@@ -236,6 +249,7 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool, session_filter: bool) 
         {
             app.refresh_preview();
             last_preview_refresh = std::time::Instant::now();
+            needs_redraw = true;
         }
 
         if app.should_quit || app.should_jump {
@@ -262,12 +276,12 @@ pub fn run(cli_preview_size: Option<u8>, open_diff: bool, session_filter: bool) 
 }
 
 /// Handle a single AppEvent, dispatching terminal input or applying background data.
-fn handle_event(app: &mut App, event: AppEvent, last_preview_refresh: &mut std::time::Instant) {
+fn handle_event(app: &mut App, event: AppEvent, last_preview_refresh: &mut std::time::Instant) -> bool {
     match event {
         AppEvent::Terminal(terminal_event) => {
-            handle_terminal_event(app, terminal_event, last_preview_refresh);
+            handle_terminal_event(app, terminal_event, last_preview_refresh)
         }
-        bg_event => app.apply_event(bg_event),
+        bg_event => { app.apply_event(bg_event); true }
     }
 }
 
@@ -276,23 +290,30 @@ fn handle_terminal_event(
     app: &mut App,
     event: Event,
     last_preview_refresh: &mut std::time::Instant,
-) {
+) -> bool {
+    let was_input_mode = app.input_mode;
+
     // Handle mouse scroll events in diff view
     if let Event::Mouse(mouse) = &event {
         handle_mouse_event(app, mouse.kind);
-        return;
+        return true;
     }
 
     // Handle key events
-    let Event::Key(key) = event else { return };
+    let Event::Key(key) = event else { return false };
     if key.kind != KeyEventKind::Press {
-        return;
+        return false;
     }
+
+    // In input mode, regular chars are buffered and don't change the UI.
+    // Only redraw for named keys (Enter, Esc) or mode changes.
+    let is_input_char = was_input_mode
+        && matches!(key.code, crossterm::event::KeyCode::Char(_));
 
     // Help overlay handling - close on any key if open
     if app.show_help {
         app.show_help = false;
-        return;
+        return true;
     }
 
     // Kill confirmation popup - y confirms, anything else cancels
@@ -302,7 +323,7 @@ fn handle_terminal_event(
         } else {
             app.pending_kill_pane_id = None;
         }
-        return;
+        return true;
     }
 
     // Remove worktree confirmation modal
@@ -313,7 +334,7 @@ fn handle_terminal_event(
             crossterm::event::KeyCode::Char('f') => app.arm_remove_force(),
             _ => app.pending_remove = None, // n, Esc, or any other key cancels
         }
-        return;
+        return true;
     }
 
     // Base branch picker modal
@@ -331,7 +352,7 @@ fn handle_terminal_event(
             crossterm::event::KeyCode::Char(c) => app.base_picker_filter_append(c),
             _ => {}
         }
-        return;
+        return true;
     }
 
     // Project picker modal
@@ -349,7 +370,7 @@ fn handle_terminal_event(
             crossterm::event::KeyCode::Char(c) => app.project_picker_filter_append(c),
             _ => {}
         }
-        return;
+        return true;
     }
 
     // Add worktree modal
@@ -426,7 +447,7 @@ fn handle_terminal_event(
                 _ => {}
             }
         }
-        return;
+        return true;
     }
 
     // Sweep modal
@@ -440,7 +461,7 @@ fn handle_terminal_event(
             crossterm::event::KeyCode::Enter => app.confirm_sweep(),
             _ => app.pending_sweep = None, // Esc or any other key cancels
         }
-        return;
+        return true;
     }
 
     // Get current context and map key to action
@@ -452,7 +473,7 @@ fn handle_terminal_event(
         && diff.is_branch_diff
         && let Some(actions::Action::EnterPatchMode) = action_for_key(ctx, key)
     {
-        return;
+        return true;
     }
 
     if let Some(action) = action_for_key(ctx, key) {
@@ -461,4 +482,7 @@ fn handle_terminal_event(
             *last_preview_refresh = std::time::Instant::now();
         }
     }
+
+    // Input chars don't need a redraw -- they're just buffered for send
+    !is_input_char
 }
