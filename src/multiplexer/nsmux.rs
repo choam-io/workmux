@@ -942,6 +942,63 @@ impl Multiplexer for NsmuxBackend {
         Ok(Some(metadata.ino().to_string()))
     }
 
+    fn discover_agents(&self) -> Result<()> {
+        // Scan all surfaces for agent signatures (π in title = pi session).
+        // Create state files for any that don't have one yet, so idle
+        // agents appear in the dashboard immediately.
+        use crate::state::{StateStore, PaneKey, AgentState};
+
+        let live_panes = self.get_all_live_pane_info()?;
+        let store = StateStore::new()?;
+        let boot_id = self.server_boot_id().unwrap_or(None);
+        let instance = self.instance_id();
+        let backend = self.name().to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        for (surface_ref, info) in &live_panes {
+            // Check if title indicates a pi session (π prefix)
+            let is_agent = info.title.as_ref()
+                .map(|t| t.starts_with("π") || t.starts_with("\u{03C0}"))
+                .unwrap_or(false);
+
+            if !is_agent { continue; }
+
+            let pane_key = PaneKey {
+                backend: backend.clone(),
+                instance: instance.clone(),
+                pane_id: surface_ref.clone(),
+            };
+
+            // Skip if state already exists
+            if let Ok(Some(_)) = store.get_agent(&pane_key) {
+                continue;
+            }
+
+            // Create state for this discovered agent
+            let state = AgentState {
+                pane_key,
+                workdir: info.working_dir.clone(),
+                status: Some(super::AgentStatus::Done), // conservative default
+                status_ts: Some(now),
+                pane_title: info.title.clone(),
+                pane_pid: 0,
+                command: String::new(),
+                updated_ts: now,
+                window_name: info.window.clone(),
+                session_name: info.session.clone(),
+                boot_id: boot_id.clone(),
+            };
+
+            let _ = store.upsert_agent(&state);
+        }
+
+        Ok(())
+    }
+
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
         // Use cmux identify to check if the surface exists.
         // For unknown UUIDs, identify returns caller.surface_ref: null.
@@ -984,45 +1041,41 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn get_all_live_pane_info(&self) -> Result<HashMap<String, LivePaneInfo>> {
-        // Parse tree --all to build a map of all terminal surfaces.
-        // This gives the dashboard reconciliation proper data to work with.
-        let output = self.cached_tree()
-            .ok_or_else(|| anyhow!("Failed to get tree output"))?;
-
+        // Use v2 system.tree for structured data including surface titles.
+        let resp = self.socket_send("system.tree", &serde_json::json!({}))?;
         let mut result = HashMap::new();
-        let mut _current_ws: Option<String> = None;
-        let mut current_ws_title: Option<String> = None;
 
-        for line in output.lines() {
-            let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+        let windows = resp
+            .get("result")
+            .and_then(|r| r.get("windows"))
+            .and_then(|w| w.as_array());
 
-            if let Some(rest) = trimmed.strip_prefix("workspace ") {
-                let parts: Vec<&str> = rest.splitn(2, '"').collect();
-                if let Some(ws) = parts[0].split_whitespace().next() {
-                    if ws.starts_with("workspace:") {
-                        _current_ws = Some(ws.to_string());
-                        // Extract title from quoted string
-                        if parts.len() > 1 {
-                            current_ws_title = parts[1].split('"').next().map(|s| s.to_string());
-                        }
-                    }
-                }
-            }
+        if let Some(windows) = windows {
+            for window in windows {
+                let workspaces = window.get("workspaces").and_then(|w| w.as_array());
+                if let Some(workspaces) = workspaces {
+                    for ws in workspaces {
+                        let ws_title = ws.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
+                        for pane in ws.get("panes").and_then(|p| p.as_array()).unwrap_or(&vec![]) {
+                            for surface in pane.get("surfaces").and_then(|s| s.as_array()).unwrap_or(&vec![]) {
+                                let stype = surface.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                if stype != "terminal" { continue; }
 
-            if let Some(rest) = trimmed.strip_prefix("surface ") {
-                if rest.contains("[terminal]") {
-                    if let Some(ref_str) = rest.split_whitespace().next() {
-                        if ref_str.starts_with("surface:") {
-                            result.insert(ref_str.to_string(), LivePaneInfo {
-                                pid: None,
-                                current_command: None,
-                                working_dir: PathBuf::from(
-                                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-                                ),
-                                title: None,
-                                session: None,
-                                window: current_ws_title.clone(),
-                            });
+                                let surface_ref = match surface.get("ref").and_then(|r| r.as_str()) {
+                                    Some(r) if r.starts_with("surface:") => r.to_string(),
+                                    _ => continue,
+                                };
+                                let title = surface.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
+
+                                result.insert(surface_ref, LivePaneInfo {
+                                    pid: None,
+                                    current_command: title.clone(), // Use title as command proxy for agent detection
+                                    working_dir: PathBuf::from("/"),
+                                    title,
+                                    session: None,
+                                    window: ws_title.clone(),
+                                });
+                            }
                         }
                     }
                 }
