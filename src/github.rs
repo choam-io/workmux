@@ -518,7 +518,7 @@ pub fn list_prs_for_branches(
     match list_prs_for_branches_graphql(repo_root, branches) {
         Ok(map) => Ok(map),
         Err(e) => {
-            debug!("github:graphql batch failed, falling back to per-branch REST: {e}");
+            tracing::warn!("github:graphql batch failed, falling back to per-branch REST: {e}");
             list_prs_for_branches_rest(repo_root, branches)
         }
     }
@@ -753,6 +753,14 @@ fn list_prs_for_branches_graphql(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("gh api graphql failed: {stderr}"));
     }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    tracing::info!(
+        repo = %repo_root.display(),
+        stdout_len = stdout_str.len(),
+        stdout_preview = %&stdout_str[..stdout_str.len().min(500)],
+        "pr_fetch: graphql raw response"
+    );
 
     let response: GraphqlResponse =
         serde_json::from_slice(&output.stdout).context("Failed to parse GraphQL response")?;
