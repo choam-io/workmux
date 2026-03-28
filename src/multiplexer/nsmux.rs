@@ -58,6 +58,25 @@ impl NsmuxBackend {
         }
     }
 
+    /// Resolve a surface UUID (from $CMUX_SURFACE_ID) to a `surface:N` ref.
+    ///
+    /// nsmux exposes UUIDs in env vars but uses `surface:N` short refs in
+    /// tree output and most CLI commands. workmux needs a single canonical
+    /// identifier, so we normalise to `surface:N` everywhere.
+    fn resolve_surface_ref(&self, uuid: &str) -> Option<String> {
+        // If it already looks like a short ref, pass through
+        if uuid.starts_with("surface:") {
+            return Some(uuid.to_string());
+        }
+        let output = self.cmux_query(&["identify", "--surface", uuid]).ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&output).ok()?;
+        parsed
+            .get("caller")
+            .and_then(|c| c.get("surface_ref"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
     /// Run a cmux CLI command, returning an error with context on failure.
     fn cmux_cmd(&self, args: &[&str]) -> Result<()> {
         Cmd::new("cmux")
@@ -267,7 +286,9 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn current_pane_id(&self) -> Option<String> {
-        std::env::var("CMUX_SURFACE_ID").ok()
+        let uuid = std::env::var("CMUX_SURFACE_ID").ok()?;
+        // Resolve UUID to surface:N ref so it matches get_all_live_pane_info() keys
+        self.resolve_surface_ref(&uuid).or(Some(uuid))
     }
 
     fn active_pane_id(&self) -> Option<String> {
@@ -609,22 +630,43 @@ impl Multiplexer for NsmuxBackend {
 
     // === Status ===
 
-    fn set_status(&self, _pane_id: &str, icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
-        // nsmux has a richer status API than tmux -- use set_status command
-        // Map workmux emoji icons to nsmux status
-        let (_value, _nsmux_icon, _color) = match icon {
+    fn set_status(&self, pane_id: &str, icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
+        // Map workmux emoji icons to nsmux native status API (SF Symbols + color)
+        let (value, nsmux_icon, color) = match icon {
             "🤖" => ("Working", "bolt.fill", "#4C8DFF"),
             "💬" => ("Waiting", "bell.fill", "#FFB84C"),
             "✅" => ("Done", "checkmark.circle.fill", "#4CAF50"),
             _ => ("Active", "circle.fill", "#888888"),
         };
-        // Use the workmux set-window-status for compatibility, or native status
-        let _ = self.cmux_cmd(&["set-window-status", icon]);
+        // Resolve pane to its workspace for scoped status
+        let ws = self.workspace_for_surface(pane_id);
+        let key = format!("workmux_{}", pane_id);
+        let mut args = vec![
+            "set-status", &key, value,
+            "--icon", nsmux_icon,
+            "--color", color,
+        ];
+        let ws_val;
+        if let Some(ref w) = ws {
+            ws_val = w.clone();
+            args.push("--workspace");
+            args.push(&ws_val);
+        }
+        let _ = self.cmux_cmd(&args);
         Ok(())
     }
 
-    fn clear_status(&self, _pane_id: &str) -> Result<()> {
-        let _ = self.cmux_cmd(&["set-window-status", ""]);
+    fn clear_status(&self, pane_id: &str) -> Result<()> {
+        let ws = self.workspace_for_surface(pane_id);
+        let key = format!("workmux_{}", pane_id);
+        let mut args = vec!["clear-status", &key];
+        let ws_val;
+        if let Some(ref w) = ws {
+            ws_val = w.clone();
+            args.push("--workspace");
+            args.push(&ws_val);
+        }
+        let _ = self.cmux_cmd(&args);
         Ok(())
     }
 
