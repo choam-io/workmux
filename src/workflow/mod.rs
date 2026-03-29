@@ -4,6 +4,7 @@ mod cleanup;
 mod context;
 mod create;
 pub mod file_ops;
+pub mod group;
 mod list;
 mod merge;
 mod open;
