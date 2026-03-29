@@ -26,6 +26,7 @@ pub mod set_window_status;
 pub mod setup;
 pub mod status;
 pub mod sync_files;
+pub mod target;
 pub mod update;
 pub mod wait;
 

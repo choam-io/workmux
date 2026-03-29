@@ -18,6 +18,7 @@ mod shell;
 mod skills;
 mod spinner;
 mod state;
+mod target;
 mod template;
 mod util;
 mod workflow;

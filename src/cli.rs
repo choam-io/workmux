@@ -271,6 +271,7 @@ Setup and configuration:
   config       Manage global configuration
   sandbox      Manage sandbox settings
   sync-files   Re-apply file operations (copy/symlink) to worktrees
+  target       Manage execution targets (run commands in Codespaces)
   claude       Claude Code integration commands
 
 Agent interaction:
@@ -616,6 +617,9 @@ enum Commands {
     /// Manage sandbox settings
     Sandbox(command::sandbox::SandboxArgs),
 
+    /// Manage execution targets (run commands in Codespaces)
+    Target(command::target::TargetArgs),
+
     /// Set agent status for the current tmux window (used by hooks)
     #[command(hide = true)]
     SetWindowStatus {
@@ -876,6 +880,7 @@ pub fn run() -> Result<()> {
             ClaudeCommands::Prune => prune_claude_config(),
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
+        Commands::Target(args) => command::target::run(args),
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::SetBase { base } => command::set_base::run(&base),
         Commands::LastDone => command::last_done::run(),
