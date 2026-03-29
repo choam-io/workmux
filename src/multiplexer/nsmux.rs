@@ -1020,6 +1020,7 @@ impl Multiplexer for NsmuxBackend {
                 window_name: info.window.clone(),
                 session_name: info.session.clone(),
                 boot_id: boot_id.clone(),
+                prompt_file: None, // Cannot recover original prompt for discovered agents
             };
 
             let _ = store.upsert_agent(&state);
