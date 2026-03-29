@@ -73,6 +73,7 @@ pub fn run(dry_run: bool) -> Result<()> {
             open_if_exists: false,
             mode: candidate.mode,
             continue_session: true,
+            headless: false,
         };
 
         info!(
