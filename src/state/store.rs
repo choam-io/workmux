@@ -484,6 +484,7 @@ mod tests {
             window_name: Some("wm-test".to_string()),
             session_name: Some("main".to_string()),
             boot_id: None,
+            prompt_file: None,
         }
     }
 
