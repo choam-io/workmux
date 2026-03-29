@@ -51,6 +51,31 @@ pub fn has_untracked_files(worktree_path: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Check if the worktree has untracked files that aren't workmux metadata.
+/// Excludes .workmux/ directory which is created by workmux add for prompt storage.
+pub fn has_meaningful_untracked_files(worktree_path: &Path) -> Result<bool> {
+    let output = Cmd::new("git")
+        .workdir(worktree_path)
+        .args(&["status", "--porcelain"])
+        .run_and_capture_stdout()?;
+
+    // Look for untracked files (lines starting with "??")
+    // Exclude .workmux/ which is workmux metadata
+    for line in output.lines() {
+        if line.starts_with("??") {
+            // Extract the file path (after "?? ")
+            if let Some(path) = line.strip_prefix("?? ") {
+                // Skip .workmux/ directory
+                if path == ".workmux/" || path.starts_with(".workmux/") {
+                    continue;
+                }
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Check if the worktree has staged changes
 pub fn has_staged_changes(worktree_path: &Path) -> Result<bool> {
     // Exit code 0 = no changes, 1 = has changes
