@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::multiplexer::{AgentStatus, Multiplexer};
 
 pub use store::StateStore;
-pub use types::{AgentState, PaneKey};
+pub use types::{AgentState, HeadlessAgentState, PaneKey};
 
 /// Persist an agent state update to the StateStore.
 ///

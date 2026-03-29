@@ -58,6 +58,11 @@ pub struct SetupFlags {
     /// Enable sandbox mode even when disabled in config
     #[arg(short = 'S', long)]
     pub sandbox: bool,
+
+    /// Run without a terminal multiplexer (agent runs as background process).
+    /// Auto-detected when no multiplexer is running.
+    #[arg(long)]
+    pub headless: bool,
 }
 
 #[derive(clap::Args, Debug)]

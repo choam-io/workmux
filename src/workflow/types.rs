@@ -34,6 +34,8 @@ pub struct CreateResult {
     pub resolved_handle: String,
     /// The mux mode that was actually used (window or session)
     pub mode: MuxMode,
+    /// True if this worktree was created in headless mode (no multiplexer)
+    pub headless: bool,
 }
 
 /// Result of merging a worktree
@@ -96,6 +98,8 @@ pub struct SetupOptions {
     pub mode: MuxMode,
     /// If true, inject the agent's continue/resume flag to resume the last conversation.
     pub continue_session: bool,
+    /// If true, run without a terminal multiplexer (agent spawns as background process).
+    pub headless: bool,
 }
 
 impl SetupOptions {
@@ -113,6 +117,7 @@ impl SetupOptions {
             open_if_exists: false,
             mode: MuxMode::default(),
             continue_session: false,
+            headless: false,
         }
     }
 
@@ -129,6 +134,7 @@ impl SetupOptions {
             open_if_exists: false,
             mode: MuxMode::default(),
             continue_session: false,
+            headless: false,
         }
     }
 
@@ -151,6 +157,7 @@ impl SetupOptions {
             open_if_exists: false,
             mode: MuxMode::default(),
             continue_session: false,
+            headless: false,
         }
     }
 }

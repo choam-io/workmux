@@ -135,6 +135,47 @@ impl AgentState {
     }
 }
 
+/// State for a headless agent (no multiplexer pane).
+///
+/// Headless agents run as background processes with stdout/stderr
+/// redirected to a log file. Tracked by worktree handle rather than pane ID.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeadlessAgentState {
+    /// Worktree handle (directory name)
+    pub handle: String,
+
+    /// Working directory of the agent
+    pub workdir: PathBuf,
+
+    /// PID of the agent process
+    pub pid: u32,
+
+    /// Path to the agent's log file
+    pub log_file: PathBuf,
+
+    /// Current agent status
+    pub status: Option<AgentStatus>,
+
+    /// Unix timestamp when the agent was created
+    pub created_ts: u64,
+
+    /// Unix timestamp of last state update
+    pub updated_ts: u64,
+}
+
+impl HeadlessAgentState {
+    /// Check if the agent process is still running.
+    pub fn is_alive(&self) -> bool {
+        // Signal 0 checks if process exists without sending a signal
+        unsafe { libc::kill(self.pid as i32, 0) == 0 }
+    }
+
+    /// Generate the filename for this headless agent's state file.
+    pub fn to_filename(&self) -> String {
+        format!("{}.json", self.handle)
+    }
+}
+
 /// Dashboard preferences stored globally.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct GlobalSettings {
