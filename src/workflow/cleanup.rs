@@ -13,10 +13,42 @@ use tracing::{debug, info, warn};
 // Re-export for use by other modules in the workflow
 pub use git::get_worktree_mode;
 
+/// Check if a worktree was created in headless mode.
+pub fn is_headless_worktree(handle: &str) -> bool {
+    git::get_worktree_meta(handle, "mode")
+        .map(|m| m == "headless")
+        .unwrap_or(false)
+}
+
 use super::context::WorkflowContext;
 use super::types::{CleanupResult, DeferredCleanup};
 
 const WINDOW_CLOSE_DELAY_MS: u64 = 300;
+
+/// Kill a headless agent process and clean up its state.
+fn kill_headless_agent(handle: &str) {
+    if let Ok(store) = crate::state::StateStore::new() {
+        if let Ok(Some(state)) = store.get_headless_agent(handle) {
+            if state.is_alive() {
+                info!(handle = handle, pid = state.pid, "cleanup:killing headless agent");
+                unsafe {
+                    libc::kill(state.pid as i32, libc::SIGTERM);
+                }
+                // Give it a moment to terminate gracefully
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // Force kill if still alive
+                if state.is_alive() {
+                    unsafe {
+                        libc::kill(state.pid as i32, libc::SIGKILL);
+                    }
+                }
+            }
+            if let Err(e) = store.delete_headless_agent(handle) {
+                warn!(handle = handle, error = %e, "cleanup:failed to delete headless agent state");
+            }
+        }
+    }
+}
 
 /// Read the worktree's `.git` file to find the admin directory path.
 ///
@@ -143,9 +175,14 @@ pub fn cleanup(
     no_hooks: bool,
 ) -> Result<CleanupResult> {
     // Determine if this worktree was created as a session or window
+    let is_headless = is_headless_worktree(handle);
     let mode = get_worktree_mode(handle);
-    let is_session_mode = mode == MuxMode::Session;
-    let kind = crate::multiplexer::handle::mode_label(mode);
+    let is_session_mode = !is_headless && mode == MuxMode::Session;
+    let kind = if is_headless {
+        "headless"
+    } else {
+        crate::multiplexer::handle::mode_label(mode)
+    };
 
     info!(
         branch = branch_name,
@@ -154,6 +191,7 @@ pub fn cleanup(
         force,
         keep_branch,
         mode = kind,
+        headless = is_headless,
         "cleanup:start"
     );
     // Change the CWD to main worktree before any destructive operations.
@@ -161,7 +199,16 @@ pub fn cleanup(
     // is run from within the worktree being deleted.
     context.chdir_to_main_worktree()?;
 
-    let mux_running = context.mux.is_running().unwrap_or(false);
+    // For headless worktrees, kill the agent process and clean up state
+    if is_headless {
+        kill_headless_agent(handle);
+    }
+
+    let mux_running = if is_headless {
+        false // Skip all mux operations for headless worktrees
+    } else {
+        context.mux.is_running().unwrap_or(false)
+    };
 
     // Check if we're running inside ANY matching target (original or duplicate)
     let current_matching_target = if mux_running {

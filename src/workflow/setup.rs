@@ -8,7 +8,7 @@ use crate::multiplexer::{
     PaneSetupOptions,
 };
 use crate::{cmd, config, git, prompt::Prompt};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::file_ops::{handle_file_operations, symlink_claude_local_md};
 use super::types::CreateResult;
@@ -298,6 +298,160 @@ pub fn setup_environment(
         did_switch: false,
         resolved_handle: handle.to_string(),
         mode: options.mode,
+        headless: false,
+    })
+}
+
+/// Sets up the worktree environment in headless mode (no multiplexer).
+///
+/// Performs file operations, runs hooks, and optionally spawns the agent
+/// as a background process with stdout/stderr redirected to a log file.
+/// The agent PID is tracked in the state store for status monitoring.
+pub fn setup_environment_headless(
+    branch_name: &str,
+    handle: &str,
+    worktree_path: &Path,
+    config: &config::Config,
+    options: &super::types::SetupOptions,
+    agent: Option<&str>,
+) -> Result<CreateResult> {
+    debug!(
+        branch = branch_name,
+        handle = handle,
+        path = %worktree_path.display(),
+        run_hooks = options.run_hooks,
+        run_file_ops = options.run_file_ops,
+        "setup_environment_headless:start"
+    );
+
+    let repo_root = git::get_main_worktree_root()?;
+    let effective_working_dir = options.working_dir.as_deref().unwrap_or(worktree_path);
+    let file_ops_source = options.config_root.as_deref().unwrap_or(&repo_root);
+
+    // Perform file operations (copy and symlink) if requested
+    if options.run_file_ops {
+        handle_file_operations(file_ops_source, effective_working_dir, &config.files)
+            .context("Failed to perform file operations")?;
+        debug!(
+            branch = branch_name,
+            "setup_environment_headless:file operations applied"
+        );
+    }
+
+    // Auto-symlink CLAUDE.local.md from main worktree if it exists and is gitignored
+    if options.run_file_ops {
+        symlink_claude_local_md(&repo_root, effective_working_dir)
+            .context("Failed to auto-symlink CLAUDE.local.md")?;
+    }
+
+    // Run post-create hooks
+    let mut hooks_run = 0;
+    if options.run_hooks
+        && let Some(post_create) = &config.post_create
+        && !post_create.is_empty()
+    {
+        hooks_run = post_create.len();
+        let abs_worktree_path = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
+        let abs_project_root = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.clone());
+        let abs_config_dir = effective_working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| effective_working_dir.to_path_buf());
+        let worktree_path_str = abs_worktree_path.to_string_lossy();
+        let project_root_str = abs_project_root.to_string_lossy();
+        let config_dir_str = abs_config_dir.to_string_lossy();
+        let hook_env = [
+            ("WORKMUX_HANDLE", handle),
+            ("WM_HANDLE", handle),
+            ("WM_WORKTREE_PATH", worktree_path_str.as_ref()),
+            ("WM_PROJECT_ROOT", project_root_str.as_ref()),
+            ("WM_CONFIG_DIR", config_dir_str.as_ref()),
+        ];
+        for (idx, command) in post_create.iter().enumerate() {
+            info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "setup_environment_headless:hook start");
+            cmd::shell_command_with_env(command, effective_working_dir, &hook_env)
+                .with_context(|| format!("Failed to run post-create command: '{}'", command))?;
+            info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "setup_environment_headless:hook complete");
+        }
+    }
+
+    // Spawn the agent as a background process if a prompt was provided
+    if let Some(prompt_path) = &options.prompt_file_path {
+        let effective_agent = agent.or(config.agent.as_deref());
+        if let Some(agent_cmd) = effective_agent {
+            let profile = crate::multiplexer::agent::resolve_profile(Some(agent_cmd));
+            let prompt_arg = profile.prompt_argument(&prompt_path.to_string_lossy());
+            let full_command = format!("{} {}", agent_cmd, prompt_arg);
+
+            // Create .workmux directory for log file
+            let workmux_dir = worktree_path.join(".workmux");
+            fs::create_dir_all(&workmux_dir).context("Failed to create .workmux directory")?;
+            let log_file = workmux_dir.join("agent.log");
+
+            info!(
+                branch = branch_name,
+                command = %full_command,
+                log_file = %log_file.display(),
+                "setup_environment_headless:spawning agent"
+            );
+
+            let log_handle = fs::File::create(&log_file)
+                .context("Failed to create agent log file")?;
+            let log_stderr = log_handle.try_clone()
+                .context("Failed to clone log file handle")?;
+
+            let child = std::process::Command::new("sh")
+                .args(["-c", &full_command])
+                .current_dir(effective_working_dir)
+                .stdout(log_handle)
+                .stderr(log_stderr)
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .with_context(|| format!("Failed to spawn headless agent: {}", full_command))?;
+
+            let pid = child.id();
+            info!(
+                branch = branch_name,
+                pid = pid,
+                "setup_environment_headless:agent spawned"
+            );
+
+            // Track in state store
+            if let Ok(store) = crate::state::StateStore::new() {
+                let state = crate::state::HeadlessAgentState {
+                    handle: handle.to_string(),
+                    workdir: worktree_path.to_path_buf(),
+                    pid,
+                    log_file: log_file.clone(),
+                    status: Some(crate::multiplexer::AgentStatus::Working),
+                    created_ts: std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    updated_ts: std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                if let Err(e) = store.upsert_headless_agent(&state) {
+                    warn!(error = %e, "setup_environment_headless:failed to save agent state");
+                }
+            }
+        }
+    }
+
+    Ok(CreateResult {
+        worktree_path: worktree_path.to_path_buf(),
+        branch_name: branch_name.to_string(),
+        post_create_hooks_run: hooks_run,
+        base_branch: None,
+        did_switch: false,
+        resolved_handle: handle.to_string(),
+        mode: options.mode,
+        headless: true,
     })
 }
 
@@ -583,6 +737,7 @@ mod tests {
             open_if_exists: false,
             mode: crate::config::MuxMode::default(),
             continue_session: false,
+            headless: false,
         }
     }
 

@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-use super::types::{AgentState, GlobalSettings, PaneKey};
+use super::types::{AgentState, GlobalSettings, HeadlessAgentState, PaneKey};
 use crate::config::SandboxRuntime;
 
 /// Manages filesystem-based state persistence for workmux agents.
@@ -204,6 +204,88 @@ impl StateStore {
                 Some((name, runtime))
             })
             .collect()
+    }
+
+    // ── Headless agent state management ───────────────────────────────────
+
+    /// Path to headless agents directory.
+    fn headless_dir(&self) -> PathBuf {
+        self.base_path.join("headless")
+    }
+
+    /// Path to a specific headless agent's state file.
+    fn headless_agent_path(&self, handle: &str) -> PathBuf {
+        self.headless_dir().join(format!("{}.json", handle))
+    }
+
+    /// Create or update headless agent state.
+    pub fn upsert_headless_agent(&self, state: &HeadlessAgentState) -> Result<()> {
+        let dir = self.headless_dir();
+        fs::create_dir_all(&dir).context("Failed to create headless agents directory")?;
+        let path = self.headless_agent_path(&state.handle);
+        let content = serde_json::to_string_pretty(state)?;
+        write_atomic(&path, content.as_bytes())
+    }
+
+    /// Read headless agent state by handle.
+    pub fn get_headless_agent(&self, handle: &str) -> Result<Option<HeadlessAgentState>> {
+        let path = self.headless_agent_path(handle);
+        match fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(state) => Ok(Some(state)),
+                Err(e) => {
+                    warn!(?path, error = %e, "corrupted headless agent state, deleting");
+                    let _ = fs::remove_file(&path);
+                    Ok(None)
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context("Failed to read headless agent state"),
+        }
+    }
+
+    /// List all headless agent states.
+    pub fn list_headless_agents(&self) -> Result<Vec<HeadlessAgentState>> {
+        let dir = self.headless_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut agents = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && !path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().ends_with(".tmp"))
+            {
+                match fs::read_to_string(&path) {
+                    Ok(content) => match serde_json::from_str(&content) {
+                        Ok(state) => agents.push(state),
+                        Err(e) => {
+                            warn!(?path, error = %e, "corrupted headless agent state, deleting");
+                            let _ = fs::remove_file(&path);
+                        }
+                    },
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                        warn!(?path, error = %e, "failed to read headless agent state");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(agents)
+    }
+
+    /// Delete headless agent state.
+    pub fn delete_headless_agent(&self, handle: &str) -> Result<()> {
+        let path = self.headless_agent_path(handle);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).context("Failed to delete headless agent state"),
+        }
     }
 
     /// Load agents with reconciliation against live multiplexer state.
@@ -619,5 +701,98 @@ mod tests {
         assert_eq!(containers.len(), 1);
         assert_eq!(containers[0].0, "old-container");
         assert_eq!(containers[0].1, SandboxRuntime::Docker);
+    }
+
+    // ── Headless agent tests ────────────────────────────────────────────────
+
+    fn test_headless_state(handle: &str) -> HeadlessAgentState {
+        HeadlessAgentState {
+            handle: handle.to_string(),
+            workdir: PathBuf::from("/home/user/project"),
+            pid: 99999,
+            log_file: PathBuf::from("/home/user/project/.workmux/agent.log"),
+            status: Some(AgentStatus::Working),
+            created_ts: 1234567890,
+            updated_ts: 1234567890,
+        }
+    }
+
+    #[test]
+    fn test_headless_upsert_and_get() {
+        let (store, _dir) = test_store();
+        let state = test_headless_state("feature-branch");
+
+        store.upsert_headless_agent(&state).unwrap();
+
+        let retrieved = store.get_headless_agent("feature-branch").unwrap().unwrap();
+        assert_eq!(retrieved.handle, "feature-branch");
+        assert_eq!(retrieved.pid, 99999);
+        assert_eq!(retrieved.status, Some(AgentStatus::Working));
+    }
+
+    #[test]
+    fn test_headless_get_nonexistent() {
+        let (store, _dir) = test_store();
+        let result = store.get_headless_agent("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_headless_delete() {
+        let (store, _dir) = test_store();
+        let state = test_headless_state("to-delete");
+
+        store.upsert_headless_agent(&state).unwrap();
+        assert!(store.get_headless_agent("to-delete").unwrap().is_some());
+
+        store.delete_headless_agent("to-delete").unwrap();
+        assert!(store.get_headless_agent("to-delete").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_headless_delete_nonexistent() {
+        let (store, _dir) = test_store();
+        // Should not error
+        store.delete_headless_agent("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn test_headless_list_all() {
+        let (store, _dir) = test_store();
+
+        store.upsert_headless_agent(&test_headless_state("branch-1")).unwrap();
+        store.upsert_headless_agent(&test_headless_state("branch-2")).unwrap();
+
+        let agents = store.list_headless_agents().unwrap();
+        assert_eq!(agents.len(), 2);
+    }
+
+    #[test]
+    fn test_headless_list_ignores_tmp_files() {
+        let (store, dir) = test_store();
+        let state = test_headless_state("branch-1");
+        store.upsert_headless_agent(&state).unwrap();
+
+        // Create a stray tmp file
+        let headless_dir = dir.path().join("headless");
+        fs::create_dir_all(&headless_dir).unwrap();
+        fs::write(headless_dir.join("stale.json.tmp"), "{}").unwrap();
+
+        let agents = store.list_headless_agents().unwrap();
+        assert_eq!(agents.len(), 1);
+    }
+
+    #[test]
+    fn test_headless_corrupted_file_deleted() {
+        let (store, dir) = test_store();
+
+        let headless_dir = dir.path().join("headless");
+        fs::create_dir_all(&headless_dir).unwrap();
+        let path = headless_dir.join("bad-handle.json");
+        fs::write(&path, "not valid json {{{").unwrap();
+
+        let result = store.get_headless_agent("bad-handle").unwrap();
+        assert!(result.is_none());
+        assert!(!path.exists(), "corrupted file should be deleted");
     }
 }

@@ -75,10 +75,12 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     }
 
     // Pre-flight checks
-    context.ensure_mux_running()?;
+    if !options.headless {
+        context.ensure_mux_running()?;
+    }
 
     // Validate backend supports session mode before creating any git state
-    if options.mode == MuxMode::Session && context.mux.name() != "tmux" {
+    if !options.headless && options.mode == MuxMode::Session && context.mux.name() != "tmux" {
         return Err(anyhow!(
             "Session mode (--session) is only supported with tmux.\n\
              Current backend: {}. Use window mode instead.",
@@ -87,58 +89,58 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     }
 
     // Check if worktree or target (window/session) already exists
-    let target = MuxHandle::new(context.mux.as_ref(), options.mode, &context.prefix, handle);
-    let full_target_name = target.full_name();
-    let mut target_exists = target.exists()?;
+    let mut target_exists;
     let worktree_exists = git::worktree_exists(branch_name)?;
-
-    // Detect cross-repo collision: mux target exists but local worktree does not.
-    // This means the target belongs to a different repository. Auto-suffix with the
-    // project directory name to avoid the collision. We use a non-numeric suffix so
-    // cleanup's `find_matching_windows` regex (base(-\d+)?) won't confuse it with
-    // `open --new` duplicates.
     let mut current_handle = handle.to_string();
-    if target_exists && !worktree_exists && !is_explicit_name {
-        let project_name = context
-            .main_worktree_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("repo");
-        let mut project_slug = slug::slugify(project_name);
-        // Guard against empty slugs (e.g., project dir "___") and purely numeric
-        // slugs (e.g., "123") which would match cleanup's `base(-\d+)?` regex and
-        // cause `wm rm` in one repo to kill the other repo's window.
-        if project_slug.is_empty() || project_slug.chars().all(|c| c.is_ascii_digit()) {
-            project_slug = format!(
-                "repo-{}",
-                if project_slug.is_empty() {
-                    "unnamed"
-                } else {
-                    &project_slug
-                }
+
+    if options.headless {
+        // In headless mode, skip all mux target checks
+        target_exists = false;
+    } else {
+        let target = MuxHandle::new(context.mux.as_ref(), options.mode, &context.prefix, handle);
+        let full_target_name = target.full_name();
+        target_exists = target.exists()?;
+
+        // Detect cross-repo collision: mux target exists but local worktree does not.
+        if target_exists && !worktree_exists && !is_explicit_name {
+            let project_name = context
+                .main_worktree_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("repo");
+            let mut project_slug = slug::slugify(project_name);
+            if project_slug.is_empty() || project_slug.chars().all(|c| c.is_ascii_digit()) {
+                project_slug = format!(
+                    "repo-{}",
+                    if project_slug.is_empty() {
+                        "unnamed"
+                    } else {
+                        &project_slug
+                    }
+                );
+            }
+            current_handle = format!("{}-{}", handle, project_slug);
+
+            let suffixed_target = MuxHandle::new(
+                context.mux.as_ref(),
+                options.mode,
+                &context.prefix,
+                &current_handle,
             );
+
+            eprintln!(
+                "workmux: {} '{}' exists in another repository, using '{}'",
+                target.kind(),
+                full_target_name,
+                suffixed_target.full_name()
+            );
+
+            target_exists = suffixed_target.exists()?;
         }
-        current_handle = format!("{}-{}", handle, project_slug);
-
-        let suffixed_target = MuxHandle::new(
-            context.mux.as_ref(),
-            options.mode,
-            &context.prefix,
-            &current_handle,
-        );
-
-        eprintln!(
-            "workmux: {} '{}' exists in another repository, using '{}'",
-            target.kind(),
-            full_target_name,
-            suffixed_target.full_name()
-        );
-
-        target_exists = suffixed_target.exists()?;
     }
 
     // If open_if_exists is set and either exists, delegate to open workflow
-    if options.open_if_exists && (target_exists || worktree_exists) {
+    if !options.headless && options.open_if_exists && (target_exists || worktree_exists) {
         debug!(
             branch = branch_name,
             handle = handle,
@@ -161,6 +163,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             open_if_exists: false,
             mode: options.mode,
             continue_session: options.continue_session,
+            headless: options.headless,
         };
 
         // In file-only mode, pass the prompt so open can write it to the worktree
@@ -177,12 +180,18 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     }
 
     // Check target using handle (the display name)
-    if target_exists {
+    if !options.headless && target_exists {
         return Err(anyhow!(
             "A {} {} named '{}' already exists.\n\
              Hint: use --name to specify a unique name.",
             context.mux.name(),
-            target.kind(),
+            MuxHandle::new(
+                context.mux.as_ref(),
+                options.mode,
+                &context.prefix,
+                handle,
+            )
+            .kind(),
             MuxHandle::new(
                 context.mux.as_ref(),
                 options.mode,
@@ -365,11 +374,15 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         );
     }
 
-    // Store the tmux mode in git config for cleanup and reopen operations.
+    // Store the mode in git config for cleanup and reopen operations.
     // This allows remove/close/merge/open to know whether to kill a window or session.
-    let mode_str = match options.mode {
-        MuxMode::Session => "session",
-        MuxMode::Window => "window",
+    let mode_str = if options.headless {
+        "headless"
+    } else {
+        match options.mode {
+            MuxMode::Session => "session",
+            MuxMode::Window => "window",
+        }
     };
     git::set_worktree_meta(&current_handle, "mode", mode_str).with_context(|| {
         format!(
@@ -433,16 +446,27 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         config_root,
         ..options
     };
-    let mut result = setup::setup_environment(
-        context.mux.as_ref(),
-        branch_name,
-        &current_handle,
-        &worktree_path,
-        &context.config,
-        &options_with_prompt,
-        agent,
-        None,
-    )?;
+    let mut result = if options_with_prompt.headless {
+        setup::setup_environment_headless(
+            branch_name,
+            &current_handle,
+            &worktree_path,
+            &context.config,
+            &options_with_prompt,
+            agent,
+        )?
+    } else {
+        setup::setup_environment(
+            context.mux.as_ref(),
+            branch_name,
+            &current_handle,
+            &worktree_path,
+            &context.config,
+            &options_with_prompt,
+            agent,
+            None,
+        )?
+    };
     result.base_branch = base_branch_for_creation.clone();
     info!(
         branch = branch_name,

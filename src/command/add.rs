@@ -97,8 +97,20 @@ fn read_stdin_lines() -> Result<Vec<String>> {
 
 /// Check preconditions for the add command (git repo and multiplexer session).
 /// Returns Ok(()) if all preconditions are met, or an error listing all failures.
-fn check_preconditions() -> Result<()> {
+/// When `headless` is true, skips the multiplexer check.
+fn check_preconditions(headless: bool) -> Result<()> {
     let is_git = git::is_git_repo()?;
+
+    if headless {
+        if is_git {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "Current directory is not a git repository.\n\n\
+             Please run this command from within a git repository."
+        ));
+    }
+
     let mux = create_backend(detect_backend());
     let is_mux_running = mux.is_running()?;
 
@@ -159,11 +171,23 @@ pub fn run(
         );
     }
 
-    // Ensure preconditions are met (git repo and multiplexer session)
-    check_preconditions()?;
-
-    // Extract sandbox override before consuming setup flags
+    // Extract sandbox and headless overrides before consuming setup flags
     let sandbox_override = setup.sandbox;
+
+    // Auto-detect headless mode: explicit flag or no mux running
+    let headless = if setup.headless {
+        true
+    } else {
+        let mux = create_backend(detect_backend());
+        !mux.is_running().unwrap_or(false)
+    };
+
+    if headless && !setup.headless {
+        eprintln!("workmux: no multiplexer detected, running in headless mode");
+    }
+
+    // Ensure preconditions are met (git repo; multiplexer session unless headless)
+    check_preconditions(headless)?;
 
     // Load config early to determine mode (CLI flag overrides config)
     let initial_config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
@@ -178,6 +202,7 @@ pub fn run(
     options.focus_window = !setup.background;
     options.open_if_exists = setup.open_if_exists;
     options.mode = mode;
+    options.headless = headless;
 
     // If using --auto-name and config has auto_name.background = true, run in background
     if auto_name && options.focus_window {
@@ -630,7 +655,12 @@ impl<'a> CreationPlan<'a> {
             super::announce_hooks(&config, Some(&self.options), super::HookPhase::PostCreate);
 
             // Create a WorkflowContext for this spec's config (reuse shared mux)
-            let context = workflow::WorkflowContext::new(config, mux.clone(), config_location)?;
+            let context = workflow::WorkflowContext::with_headless(
+                config,
+                mux.clone(),
+                config_location,
+                self.options.headless,
+            )?;
 
             let result = workflow::create(
                 &context,
@@ -654,26 +684,36 @@ impl<'a> CreationPlan<'a> {
             })?;
 
             // Use resolved handle for tracking (may differ from original if auto-suffixed)
-            let full_window_name = prefixed(&context.prefix, &result.resolved_handle);
+            // Skip mux tracking for headless worktrees (no window/session to track)
+            if !result.headless {
+                let full_window_name = prefixed(&context.prefix, &result.resolved_handle);
 
-            if self.wait {
-                created_targets.push(full_window_name.clone());
-            }
+                if self.wait {
+                    created_targets.push(full_window_name.clone());
+                }
 
-            // Track for concurrency control
-            if self.max_concurrent.is_some() {
-                active_targets.push(full_window_name);
+                // Track for concurrency control
+                if self.max_concurrent.is_some() {
+                    active_targets.push(full_window_name);
+                }
             }
 
             if result.post_create_hooks_run > 0 {
                 println!("✓ Setup complete");
             }
 
-            println!(
-                "✓ Successfully created worktree and tmux {} for '{}'",
-                mode_label(mode),
-                result.branch_name
-            );
+            if result.headless {
+                println!(
+                    "✓ Successfully created worktree (headless) for '{}'",
+                    result.branch_name
+                );
+            } else {
+                println!(
+                    "✓ Successfully created worktree and tmux {} for '{}'",
+                    mode_label(mode),
+                    result.branch_name
+                );
+            }
             if let Some(ref base) = result.base_branch {
                 println!("  Base: {}", base);
             }
