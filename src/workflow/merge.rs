@@ -142,8 +142,7 @@ pub fn merge(
     // Only check for unstaged/untracked when worktree will be deleted (!keep)
     // With --keep, the worktree persists so no data loss risk
     let has_unstaged = !keep && git::has_unstaged_changes(&worktree_path)?;
-    // Use has_meaningful_untracked_files to exclude .workmux/ metadata directory
-    let has_untracked = !keep && git::has_meaningful_untracked_files(&worktree_path)?;
+    let has_untracked = !keep && git::has_untracked_files(&worktree_path)?;
 
     if (has_unstaged || has_untracked) && !ignore_uncommitted {
         let mut issues = Vec::new();
