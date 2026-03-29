@@ -336,17 +336,9 @@ fn launch_group_agent(
     // Load config for agent setup
     let config = Config::load(None)?;
 
-    // Build agent command with cross-repo context
+    // Get agent command and profile
     let agent_cmd = config.agent.as_deref().unwrap_or("claude");
-
-    // Create pane command with prompt injection
-    let _pane_cmd = if let Some(p) = prompt {
-        let prompt_text = p.read_content()?;
-        // Use the prompt file we wrote
-        format!("{} -p \"{}\"", agent_cmd, prompt_text.replace('"', "\\\""))
-    } else {
-        agent_cmd.to_string()
-    };
+    let agent_profile = crate::multiplexer::agent::resolve_profile(Some(agent_cmd));
 
     // Create window in workspace directory
     let handle = MuxHandle::new(mux, MuxMode::Window, "wm-", &window_name);
@@ -359,12 +351,43 @@ fn launch_group_agent(
     }
 
     use crate::multiplexer::CreateWindowParams;
-    mux.create_window(CreateWindowParams {
+    let pane_id = mux.create_window(CreateWindowParams {
         prefix: "wm-",
         name: &window_name,
         cwd: workspace_dir,
         after_window: None,
     })?;
+
+    // Build agent command with prompt injection if provided
+    let agent_command = if prompt.is_some() {
+        // The prompt file was already written to .workmux/PROMPT.md in add()
+        let prompt_path = workspace_dir.join(".workmux").join("PROMPT.md");
+        let prompt_arg = agent_profile.prompt_argument(&prompt_path.to_string_lossy());
+        format!("{} {}", agent_cmd, prompt_arg)
+    } else {
+        agent_cmd.to_string()
+    };
+
+    // Wait for shell to be ready, then send the agent command
+    for _ in 0..30 {
+        if let Some(screen) = mux.capture_pane(&pane_id, 5) {
+            if !screen.trim().is_empty() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    mux.send_keys(&pane_id, &agent_command)?;
+
+    // Set working status for agents that need it when launched with a prompt
+    if prompt.is_some() && agent_profile.needs_auto_status() {
+        let icon = config.status_icons.working();
+        if config.status_format.unwrap_or(true) {
+            let _ = mux.ensure_status_format(&pane_id);
+        }
+        let _ = mux.set_status(&pane_id, icon, false);
+    }
 
     if !background {
         handle.select()?;
@@ -739,4 +762,112 @@ fn remove_worktree_and_branch(repo_state: &GroupRepoState) -> Result<()> {
         .with_context(|| format!("Failed to delete branch: {}", repo_state.branch))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_workspace_dir_generation() {
+        let dir = workspace_dir("choam", "feat/tabbed-popup").unwrap();
+        assert!(dir.to_string_lossy().contains("choam--feat-tabbed-popup"));
+    }
+
+    #[test]
+    fn test_workspace_dir_slugifies_branch() {
+        let dir1 = workspace_dir("test", "feature/foo").unwrap();
+        let dir2 = workspace_dir("test", "feature_bar").unwrap();
+
+        // Branch names are slugified
+        assert!(dir1.to_string_lossy().ends_with("test--feature-foo"));
+        assert!(dir2.to_string_lossy().ends_with("test--feature-bar"));
+    }
+
+    #[test]
+    fn test_expand_path_tilde() {
+        let home = home::home_dir().unwrap();
+
+        let path = expand_path("~/test");
+        assert_eq!(path, home.join("test"));
+
+        let path = expand_path("~");
+        assert_eq!(path, home);
+
+        // Absolute paths unchanged
+        let path = expand_path("/tmp/test");
+        assert_eq!(path, PathBuf::from("/tmp/test"));
+
+        // Relative paths unchanged
+        let path = expand_path("relative/path");
+        assert_eq!(path, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_group_state_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+
+        let state = GroupState {
+            group_name: "test-group".to_string(),
+            branch: "feat/test".to_string(),
+            repos: vec![GroupRepoState {
+                repo_path: PathBuf::from("/home/user/repo1"),
+                worktree_path: PathBuf::from("/home/user/repo1__worktrees/feat-test"),
+                branch: "feat/test".to_string(),
+                symlink_name: "repo1".to_string(),
+            }],
+            merge_order: vec!["repo1".to_string()],
+            created_at: 1234567890,
+            headless: false,
+        };
+
+        state.save(tmp.path()).unwrap();
+        let loaded = GroupState::load(tmp.path()).unwrap();
+
+        assert_eq!(loaded.group_name, state.group_name);
+        assert_eq!(loaded.branch, state.branch);
+        assert_eq!(loaded.repos.len(), 1);
+        assert_eq!(loaded.repos[0].symlink_name, "repo1");
+        assert_eq!(loaded.merge_order, vec!["repo1"]);
+        assert_eq!(loaded.created_at, 1234567890);
+        assert!(!loaded.headless);
+    }
+
+    #[test]
+    fn test_group_state_headless_flag() {
+        let tmp = TempDir::new().unwrap();
+
+        let state = GroupState {
+            group_name: "headless-test".to_string(),
+            branch: "main".to_string(),
+            repos: vec![],
+            merge_order: vec![],
+            created_at: 0,
+            headless: true,
+        };
+
+        state.save(tmp.path()).unwrap();
+        let loaded = GroupState::load(tmp.path()).unwrap();
+
+        assert!(loaded.headless);
+    }
+
+    #[test]
+    fn test_groups_dir() {
+        let dir = groups_dir().unwrap();
+        let home = home::home_dir().unwrap();
+        assert_eq!(dir, home.join(".local/share/workmux/groups"));
+    }
+
+    #[test]
+    fn test_list_empty_groups_dir() {
+        // If groups dir doesn't exist, list returns empty vec
+        // This is tested implicitly - groups_dir() returns a path that may not exist
+        // and list() should handle that gracefully
+        let groups = list().unwrap();
+        // We can't assert it's empty because there might be real groups
+        // Just verify it doesn't error
+        let _ = groups;
+    }
 }
