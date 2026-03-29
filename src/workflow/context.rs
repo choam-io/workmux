@@ -23,6 +23,9 @@ pub struct WorkflowContext {
     /// Absolute path to the directory where config was found.
     /// Used as source for file operations (copy/symlink).
     pub config_source_dir: PathBuf,
+    /// If true, running without a terminal multiplexer.
+    /// Mux operations are skipped and agents run as background processes.
+    pub headless: bool,
 }
 
 impl WorkflowContext {
@@ -35,6 +38,16 @@ impl WorkflowContext {
         config: config::Config,
         mux: Arc<dyn Multiplexer>,
         config_location: Option<config::ConfigLocation>,
+    ) -> Result<Self> {
+        Self::with_headless(config, mux, config_location, false)
+    }
+
+    /// Create a new workflow context with explicit headless mode.
+    pub fn with_headless(
+        config: config::Config,
+        mux: Arc<dyn Multiplexer>,
+        config_location: Option<config::ConfigLocation>,
+        headless: bool,
     ) -> Result<Self> {
         if !git::is_git_repo()? {
             return Err(anyhow!("Not in a git repository"));
@@ -65,6 +78,7 @@ impl WorkflowContext {
             main_branch = %main_branch,
             prefix = %prefix,
             backend = mux.name(),
+            headless = headless,
             config_rel_dir = %config_rel_dir.display(),
             config_source_dir = %config_source_dir.display(),
             "workflow_context:created"
@@ -79,6 +93,7 @@ impl WorkflowContext {
             mux,
             config_rel_dir,
             config_source_dir,
+            headless,
         })
     }
 
@@ -86,6 +101,9 @@ impl WorkflowContext {
     ///
     /// Call this at the start of workflows that require a multiplexer.
     pub fn ensure_mux_running(&self) -> Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         if !self.mux.is_running()? {
             return Err(anyhow!(
                 "{} is not running. Please start a {} session first.",

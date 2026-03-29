@@ -140,6 +140,7 @@ pub fn open(
             did_switch: true,
             resolved_handle: base_handle,
             mode,
+            headless: false,
         });
     }
 
