@@ -1,16 +1,49 @@
 use anyhow::{Context, Result, anyhow};
 use regex::Regex;
+use std::path::PathBuf;
 
 use crate::git;
 use crate::multiplexer::MuxHandle;
 use crate::multiplexer::util::prefixed;
 use crate::prompt::Prompt;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
 use crate::config::MuxMode;
+
+/// Detect a stored prompt file in the worktree's .workmux directory.
+///
+/// Looks for files matching `PROMPT-{branch}.md` pattern.
+/// Returns the path if found and the file is non-empty.
+fn detect_stored_prompt(worktree_path: &std::path::Path, branch_name: &str) -> Option<PathBuf> {
+    let workmux_dir = worktree_path.join(".workmux");
+    if !workmux_dir.exists() {
+        return None;
+    }
+
+    // Sanitize branch name the same way write_prompt_file does
+    let safe_branch_name = branch_name.replace(['/', '\\', ':'], "-");
+    let prompt_filename = format!("PROMPT-{}.md", safe_branch_name);
+    let prompt_path = workmux_dir.join(&prompt_filename);
+
+    if prompt_path.exists() {
+        // Verify the file is non-empty
+        if let Ok(metadata) = std::fs::metadata(&prompt_path) {
+            if metadata.len() > 0 {
+                debug!(
+                    path = %prompt_path.display(),
+                    branch = branch_name,
+                    "open:detected stored prompt file"
+                );
+                return Some(prompt_path);
+            }
+        }
+    }
+
+    None
+}
 
 /// Open a tmux window for an existing worktree
 pub fn open(
@@ -206,9 +239,30 @@ pub fn open(
         setup::write_prompt_file(Some(&worktree_path), &branch_name, prompt)?;
     }
 
+    // Auto-detect stored prompt if no explicit prompt was provided.
+    // This enables prompt re-injection when reopening a worktree that was
+    // previously started with a prompt (e.g., via `workmux add -P`).
+    let auto_detected_prompt = if options.prompt_file_path.is_none() && prompt_file_only.is_none()
+    {
+        detect_stored_prompt(&worktree_path, &branch_name)
+    } else {
+        None
+    };
+
+    if auto_detected_prompt.is_some() {
+        info!(
+            handle = handle,
+            branch = branch_name,
+            prompt = ?auto_detected_prompt,
+            "open:auto-injecting stored prompt"
+        );
+    }
+
     let options_with_workdir = SetupOptions {
         working_dir,
         config_root,
+        // Use auto-detected prompt if no explicit prompt was provided
+        prompt_file_path: options.prompt_file_path.or(auto_detected_prompt),
         ..options
     };
 

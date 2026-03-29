@@ -114,6 +114,11 @@ pub struct AgentState {
     /// if this doesn't match the current server's boot_id, the server restarted.
     #[serde(default)]
     pub boot_id: Option<String>,
+
+    /// Path to the prompt file used to start this agent (for resurrection).
+    /// Stored as a relative path from the worktree root when possible.
+    #[serde(default)]
+    pub prompt_file: Option<PathBuf>,
 }
 
 impl AgentState {

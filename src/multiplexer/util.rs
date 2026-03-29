@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 use std::path::Path;
+use tracing::debug;
 
 /// Helper function to add prefix to window name.
 ///
@@ -103,11 +104,21 @@ pub fn rewrite_agent_command(
     // For non-POSIX shells (nushell, fish, pwsh), wrap in sh -c '...' to ensure
     // $(cat ...) command substitution works.
     // Prefix with space to prevent shell history entry.
-    if is_posix_shell(shell) {
-        Some(format!(" {}", inner_cmd))
+    let final_cmd = if is_posix_shell(shell) {
+        format!(" {}", inner_cmd)
     } else {
-        Some(format!(" {}", wrap_for_non_posix_shell(&inner_cmd)))
-    }
+        format!(" {}", wrap_for_non_posix_shell(&inner_cmd))
+    };
+
+    debug!(
+        prompt_file = %prompt_file.display(),
+        relative_path = %prompt_path,
+        agent = effective_agent,
+        command = %final_cmd.trim(),
+        "rewrite_agent_command:injecting prompt"
+    );
+
+    Some(final_cmd)
 }
 
 /// Resolve a pane's command: handle `<agent>` placeholder, auto-detect known

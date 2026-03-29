@@ -69,6 +69,9 @@ pub fn persist_agent_update(
         now
     };
 
+    // Preserve existing prompt_file (we don't have access to it in status updates)
+    let prompt_file = existing.as_ref().and_then(|e| e.prompt_file.clone());
+
     // Resolve title: explicit override wins, then existing stored title, then live
     let pane_title = title_override
         .or(existing.and_then(|e| e.pane_title))
@@ -97,6 +100,7 @@ pub fn persist_agent_update(
         window_name: live_info.window,
         session_name: live_info.session,
         boot_id,
+        prompt_file,
     };
 
     info!(

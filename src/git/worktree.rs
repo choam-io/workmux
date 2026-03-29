@@ -159,17 +159,57 @@ pub fn list_worktrees_in(workdir: Option<&Path>) -> Result<Vec<(PathBuf, String)
 }
 
 /// Store per-worktree metadata in git config.
+///
+/// Includes retry logic to handle lock contention when multiple workmux commands
+/// run in parallel (e.g., spawning multiple worktrees simultaneously).
 pub fn set_worktree_meta(handle: &str, key: &str, value: &str) -> Result<()> {
-    Cmd::new("git")
-        .args(&[
-            "config",
-            "--local",
-            &format!("workmux.worktree.{}.{}", handle, key),
-            value,
-        ])
-        .run()
-        .with_context(|| format!("Failed to set worktree metadata {}.{}", handle, key))?;
-    Ok(())
+    const MAX_RETRIES: u32 = 5;
+    const BASE_DELAY_MS: u64 = 50;
+
+    let config_key = format!("workmux.worktree.{}.{}", handle, key);
+
+    for attempt in 0..MAX_RETRIES {
+        match Cmd::new("git")
+            .args(&["config", "--local", &config_key, value])
+            .run()
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let err_str = e.to_string();
+                // Check for lock-related errors
+                if err_str.contains("could not lock config file")
+                    || err_str.contains("File exists")
+                    || err_str.contains(".lock")
+                {
+                    if attempt < MAX_RETRIES - 1 {
+                        // Exponential backoff with jitter
+                        let delay = BASE_DELAY_MS * (1 << attempt)
+                            + (std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .subsec_millis() as u64
+                                % 50);
+                        tracing::debug!(
+                            key = %config_key,
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            "git config lock contention, retrying"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        continue;
+                    }
+                }
+                return Err(e)
+                    .with_context(|| format!("Failed to set worktree metadata {}", config_key));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "Failed to set worktree metadata {} after {} retries due to lock contention",
+        config_key,
+        MAX_RETRIES
+    )
 }
 
 /// Retrieve per-worktree metadata from git config.
