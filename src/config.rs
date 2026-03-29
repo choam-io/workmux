@@ -127,6 +127,23 @@ pub struct WindowConfig {
     pub panes: Option<Vec<PaneConfig>>,
 }
 
+/// Configuration for a single repository in a group
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GroupRepoConfig {
+    /// Path to the repository (supports ~ expansion)
+    pub path: String,
+}
+
+/// Configuration for a group of repositories
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GroupConfig {
+    /// List of repositories in this group
+    pub repos: Vec<GroupRepoConfig>,
+    /// Order in which to merge branches (repo directory names)
+    #[serde(default)]
+    pub merge_order: Option<Vec<String>>,
+}
+
 /// Configuration for the workmux tool, read from .workmux.yaml
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Config {
@@ -230,6 +247,11 @@ pub struct Config {
     /// Container sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
+
+    /// Named groups of repositories for cross-repo worktree operations.
+    /// Groups are global-only (ignored in project .workmux.yaml).
+    #[serde(default)]
+    pub groups: Option<std::collections::HashMap<String, GroupConfig>>,
 }
 
 /// Configuration for a single tmux pane
@@ -1771,6 +1793,16 @@ impl Config {
                 .sandbox
                 .dangerously_allow_unsandboxed_host_exec,
         };
+
+        // Security: groups is global-only. Project config cannot define groups --
+        // this prevents a malicious repo from controlling cross-repo operations.
+        merged.groups = self.groups.clone();
+        if project.groups.is_some() {
+            tracing::warn!(
+                "groups in project config (.workmux.yaml) is ignored -- \
+                move it to your global config (~/.config/workmux/config.yaml)"
+            );
+        }
 
         merged
     }

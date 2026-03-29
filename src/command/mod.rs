@@ -8,6 +8,7 @@ pub mod config;
 pub mod dashboard;
 pub mod docs;
 pub mod exec;
+pub mod group;
 pub mod host_exec;
 pub mod last_agent;
 pub mod last_done;

@@ -271,6 +271,7 @@ Setup and configuration:
   config       Manage global configuration
   sandbox      Manage sandbox settings
   sync-files   Re-apply file operations (copy/symlink) to worktrees
+  target       Manage execution targets (run commands in Codespaces)
   claude       Claude Code integration commands
 
 Agent interaction:
@@ -616,6 +617,12 @@ enum Commands {
     /// Manage sandbox settings
     Sandbox(command::sandbox::SandboxArgs),
 
+    /// Cross-repo worktree groups
+    Group {
+        #[command(subcommand)]
+        command: GroupCommands,
+    },
+
     /// Set agent status for the current tmux window (used by hooks)
     #[command(hide = true)]
     SetWindowStatus {
@@ -696,6 +703,90 @@ enum Commands {
 enum ClaudeCommands {
     /// Remove stale entries from ~/.claude.json for deleted worktrees
     Prune,
+}
+
+#[derive(Subcommand)]
+enum GroupCommands {
+    /// Create worktrees across all repos in a group
+    Add {
+        /// Group name (defined in ~/.config/workmux/config.yaml)
+        group_name: String,
+
+        /// Branch name to create in each repo
+        branch: String,
+
+        /// Prompt text to inject into the agent
+        #[arg(short = 'p', long = "prompt")]
+        prompt: Option<String>,
+
+        /// Read prompt from a file
+        #[arg(short = 'P', long = "prompt-file")]
+        prompt_file: Option<std::path::PathBuf>,
+
+        /// Open an editor to write the prompt
+        #[arg(short = 'e', long = "prompt-editor")]
+        prompt_editor: bool,
+
+        /// Create workspace without focusing the window
+        #[arg(short = 'b', long)]
+        background: bool,
+
+        /// Create worktrees without opening a mux window (headless mode)
+        #[arg(long)]
+        headless: bool,
+    },
+
+    /// List all active group workspaces
+    #[command(visible_alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show status of a group workspace
+    Status {
+        /// Group name
+        group_name: String,
+
+        /// Branch name
+        branch: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Merge all branches in a group (in declared order) and clean up
+    Merge {
+        /// Group name
+        group_name: String,
+
+        /// Branch name to merge
+        branch: String,
+
+        /// Target branch to merge into (defaults to each repo's default branch)
+        #[arg(long)]
+        into: Option<String>,
+
+        /// Keep worktrees after merging (don't clean up)
+        #[arg(short = 'k', long)]
+        keep: bool,
+    },
+
+    /// Remove a group workspace (worktrees and branches)
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// Group name
+        group_name: String,
+
+        /// Branch name
+        branch: String,
+
+        /// Force removal even with uncommitted changes
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
 }
 
 /// Check if the command should show the nerdfont setup prompt.
@@ -876,6 +967,42 @@ pub fn run() -> Result<()> {
             ClaudeCommands::Prune => prune_claude_config(),
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
+        Commands::Group { command } => match command {
+            GroupCommands::Add {
+                group_name,
+                branch,
+                prompt,
+                prompt_file,
+                prompt_editor,
+                background,
+                headless,
+            } => command::group::run_add(
+                &group_name,
+                &branch,
+                prompt.as_deref(),
+                prompt_file.as_deref(),
+                prompt_editor,
+                background,
+                headless,
+            ),
+            GroupCommands::List { json } => command::group::run_list(json),
+            GroupCommands::Status {
+                group_name,
+                branch,
+                json,
+            } => command::group::run_status(&group_name, &branch, json),
+            GroupCommands::Merge {
+                group_name,
+                branch,
+                into,
+                keep,
+            } => command::group::run_merge(&group_name, &branch, into.as_deref(), keep),
+            GroupCommands::Remove {
+                group_name,
+                branch,
+                force,
+            } => command::group::run_remove(&group_name, &branch, force),
+        },
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::SetBase { base } => command::set_base::run(&base),
         Commands::LastDone => command::last_done::run(),
