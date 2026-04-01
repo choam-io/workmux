@@ -86,6 +86,18 @@ pub fn workspace_dir(group_name: &str, branch: &str) -> Result<PathBuf> {
     Ok(groups_dir()?.join(dir_name))
 }
 
+/// Derive the mux window handle for a group workspace.
+/// Uses the same naming logic as regular worktrees (derive_handle from branch).
+fn derive_group_handle(branch: &str, config: &Config) -> Result<String> {
+    crate::naming::derive_handle(branch, None, config)
+}
+
+/// Get the mux prefix for window names. Uses the config method which
+/// respects nerdfont detection (glyph prefix when available).
+fn mux_prefix(config: &Config) -> &str {
+    config.window_prefix()
+}
+
 /// Expand tilde in path
 fn expand_path(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -242,7 +254,8 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
     if !headless {
         let mux = create_backend(detect_backend());
         if mux.is_running()? {
-            launch_group_agent(&ws_dir, group_name, branch, prompt, background, mux.as_ref())?;
+            let repo_names: Vec<String> = repo_states.iter().map(|r| r.symlink_name.clone()).collect();
+            launch_group_agent(&ws_dir, group_name, branch, &repo_names, prompt, background, mux.as_ref())?;
         } else if !background {
             eprintln!(
                 "workmux: no multiplexer running, created workspace at {}",
@@ -327,36 +340,41 @@ fn launch_group_agent(
     workspace_dir: &Path,
     group_name: &str,
     branch: &str,
+    repo_names: &[String],
     prompt: Option<&Prompt>,
     background: bool,
     mux: &dyn Multiplexer,
 ) -> Result<()> {
-    let window_name = format!("grp-{}--{}", group_name, slug::slugify(branch));
-
     // Load config for agent setup
     let config = Config::load(None)?;
+
+    // Derive handle from branch name using the same naming as regular worktrees
+    let handle = derive_group_handle(branch, &config)?;
+    let prefix = mux_prefix(&config);
 
     // Get agent command and profile
     let agent_cmd = config.agent.as_deref().unwrap_or("claude");
     let agent_profile = crate::multiplexer::agent::resolve_profile(Some(agent_cmd));
 
-    // Create window in workspace directory
-    let handle = MuxHandle::new(mux, MuxMode::Window, "wm-", &window_name);
+    let mux_handle = MuxHandle::new(mux, MuxMode::Window, prefix, &handle);
 
-    if handle.exists()? {
+    if mux_handle.exists()? {
         if !background {
-            handle.select()?;
+            mux_handle.select()?;
         }
         return Ok(());
     }
 
     use crate::multiplexer::CreateWindowParams;
-    let pane_id = mux.create_window(CreateWindowParams {
-        prefix: "wm-",
-        name: &window_name,
+    let surface_ref = mux.create_window(CreateWindowParams {
+        prefix,
+        name: &handle,
         cwd: workspace_dir,
         after_window: None,
     })?;
+
+    // Set group info status pill on the NEW workspace (resolve via surface ref)
+    set_group_info_status(&surface_ref, group_name, repo_names);
 
     // Build agent command with prompt injection if provided
     let agent_command = if prompt.is_some() {
@@ -370,7 +388,7 @@ fn launch_group_agent(
 
     // Wait for shell to be ready, then send the agent command
     for _ in 0..30 {
-        if let Some(screen) = mux.capture_pane(&pane_id, 5) {
+        if let Some(screen) = mux.capture_pane(&surface_ref, 5) {
             if !screen.trim().is_empty() {
                 break;
             }
@@ -378,22 +396,64 @@ fn launch_group_agent(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    mux.send_keys(&pane_id, &agent_command)?;
+    mux.send_keys(&surface_ref, &agent_command)?;
 
     // Set working status for agents that need it when launched with a prompt
     if prompt.is_some() && agent_profile.needs_auto_status() {
         let icon = config.status_icons.working();
         if config.status_format.unwrap_or(true) {
-            let _ = mux.ensure_status_format(&pane_id);
+            let _ = mux.ensure_status_format(&surface_ref);
         }
-        let _ = mux.set_status(&pane_id, icon, false);
+        let _ = mux.set_status(&surface_ref, icon, false);
     }
 
     if !background {
-        handle.select()?;
+        mux_handle.select()?;
     }
 
     Ok(())
+}
+
+/// Set a status pill showing group name and repos on the new group workspace.
+/// Resolves the workspace ref from the surface ref via `cmux tree`.
+fn set_group_info_status(surface_ref: &str, group_name: &str, repo_names: &[String]) {
+    let ws_ref = resolve_workspace_for_surface(surface_ref);
+    let label = format!("{}: {}", group_name, repo_names.join(", "));
+    let mut args = vec![
+        "set-status", "workmux_group", &label,
+        "--icon", "folder.fill",
+        "--color", "#8B5CF6",
+    ];
+    let ws_val;
+    if let Some(ref ws) = ws_ref {
+        ws_val = ws.clone();
+        args.push("--workspace");
+        args.push(&ws_val);
+    }
+    let _ = crate::cmd::Cmd::new("cmux").args(&args).run();
+}
+
+/// Parse `cmux tree --all` to find which workspace contains a given surface ref.
+fn resolve_workspace_for_surface(surface_ref: &str) -> Option<String> {
+    let output = crate::cmd::Cmd::new("cmux")
+        .args(&["tree", "--all"])
+        .run_and_capture_stdout()
+        .ok()?;
+    let mut current_ws: Option<String> = None;
+    for line in output.lines() {
+        let trimmed = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());
+        if let Some(rest) = trimmed.strip_prefix("workspace ") {
+            if let Some(ws) = rest.split_whitespace().next() {
+                if ws.starts_with("workspace:") {
+                    current_ws = Some(ws.to_string());
+                }
+            }
+        }
+        if trimmed.contains(surface_ref) {
+            return current_ws;
+        }
+    }
+    None
 }
 
 /// List all active group workspaces
@@ -477,9 +537,11 @@ pub fn status(group_name: &str, branch: &str) -> Result<GroupStatus> {
 
     // Check if agent window exists
     let mux = create_backend(detect_backend());
-    let window_name = format!("grp-{}--{}", group_name, slug::slugify(branch));
-    let handle = MuxHandle::new(mux.as_ref(), MuxMode::Window, "wm-", &window_name);
-    let agent_running = handle.exists().unwrap_or(false);
+    let config = Config::load(None)?;
+    let handle = derive_group_handle(branch, &config)?;
+    let prefix = mux_prefix(&config);
+    let mux_handle = MuxHandle::new(mux.as_ref(), MuxMode::Window, prefix, &handle);
+    let agent_running = mux_handle.exists().unwrap_or(false);
 
     Ok(GroupStatus {
         state,
@@ -697,10 +759,12 @@ fn remove_internal(group_name: &str, branch: &str, force: bool) -> Result<()> {
 
     // Close mux window if exists
     let mux = create_backend(detect_backend());
-    let window_name = format!("grp-{}--{}", group_name, slug::slugify(branch));
-    let handle = MuxHandle::new(mux.as_ref(), MuxMode::Window, "wm-", &window_name);
-    if handle.exists()? {
-        MuxHandle::kill_full(mux.as_ref(), MuxMode::Window, &handle.full_name())?;
+    let config = Config::load(None)?;
+    let handle = derive_group_handle(branch, &config)?;
+    let prefix = mux_prefix(&config);
+    let mux_handle = MuxHandle::new(mux.as_ref(), MuxMode::Window, prefix, &handle);
+    if mux_handle.exists()? {
+        MuxHandle::kill_full(mux.as_ref(), MuxMode::Window, &mux_handle.full_name())?;
     }
 
     // Remove worktrees in each repo
