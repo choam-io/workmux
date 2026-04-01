@@ -746,11 +746,11 @@ enum GroupCommands {
 
     /// Show status of a group workspace
     Status {
-        /// Group name
-        group_name: String,
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
 
-        /// Branch name
-        branch: String,
+        /// Branch name (detected from cwd if omitted)
+        branch: Option<String>,
 
         /// Output as JSON
         #[arg(long)]
@@ -759,11 +759,11 @@ enum GroupCommands {
 
     /// Merge all branches in a group (in declared order) and clean up
     Merge {
-        /// Group name
-        group_name: String,
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
 
-        /// Branch name to merge
-        branch: String,
+        /// Branch name to merge (detected from cwd if omitted)
+        branch: Option<String>,
 
         /// Target branch to merge into (defaults to each repo's default branch)
         #[arg(long)]
@@ -777,11 +777,11 @@ enum GroupCommands {
     /// Remove a group workspace (worktrees and branches)
     #[command(visible_alias = "rm")]
     Remove {
-        /// Group name
-        group_name: String,
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
 
-        /// Branch name
-        branch: String,
+        /// Branch name (detected from cwd if omitted)
+        branch: Option<String>,
 
         /// Force removal even with uncommitted changes
         #[arg(short = 'f', long)]
@@ -990,18 +990,18 @@ pub fn run() -> Result<()> {
                 group_name,
                 branch,
                 json,
-            } => command::group::run_status(&group_name, &branch, json),
+            } => command::group::run_status(group_name, branch, json),
             GroupCommands::Merge {
                 group_name,
                 branch,
                 into,
                 keep,
-            } => command::group::run_merge(&group_name, &branch, into.as_deref(), keep),
+            } => command::group::run_merge(group_name, branch, into.as_deref(), keep),
             GroupCommands::Remove {
                 group_name,
                 branch,
                 force,
-            } => command::group::run_remove(&group_name, &branch, force),
+            } => command::group::run_remove(group_name, branch, force),
         },
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::SetBase { base } => command::set_base::run(&base),

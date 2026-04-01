@@ -1,13 +1,50 @@
 //! Command handlers for `workmux group` subcommands.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::io::IsTerminal;
 use tabled::{Table, Tabled, settings::{Padding, Style}};
 
 use crate::config::Config;
 use crate::util::format_compact_age;
-use crate::workflow::group::{self, GroupAddArgs, GroupMergeArgs};
+use crate::workflow::group::{self, GroupAddArgs, GroupMergeArgs, GroupState, STATE_FILE};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
+
+/// Detect group context by looking for `.workmux-group.yaml` in the current
+/// directory or any ancestor. Returns `(group_name, branch)` if found.
+pub fn detect_group_context() -> Result<(String, String)> {
+    let cwd = std::env::current_dir().context("Could not determine current directory")?;
+    let mut dir = cwd.as_path();
+    loop {
+        let candidate = dir.join(STATE_FILE);
+        if candidate.is_file() {
+            let state = GroupState::load(dir)?;
+            return Ok((state.group_name, state.branch));
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    bail!(
+        "Not in a group workspace (no {} found in current directory or ancestors).\n\
+         Provide <GROUP_NAME> <BRANCH> explicitly, or cd into a group workspace.",
+        STATE_FILE
+    );
+}
+
+/// Resolve group_name and branch from explicit args or cwd detection.
+fn resolve_group_args(
+    group_name: Option<String>,
+    branch: Option<String>,
+) -> Result<(String, String)> {
+    match (group_name, branch) {
+        (Some(g), Some(b)) => Ok((g, b)),
+        (None, None) => detect_group_context(),
+        (Some(_), None) | (None, Some(_)) => {
+            bail!("Provide both <GROUP_NAME> and <BRANCH>, or omit both to detect from cwd")
+        }
+    }
+}
 
 /// Run `workmux group add`
 pub fn run_add(
@@ -130,8 +167,13 @@ struct RepoStatusRow {
 }
 
 /// Run `workmux group status`
-pub fn run_status(group_name: &str, branch: &str, json: bool) -> Result<()> {
-    let status = group::status(group_name, branch)?;
+pub fn run_status(
+    group_name: Option<String>,
+    branch: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let (group_name, branch) = resolve_group_args(group_name, branch)?;
+    let status = group::status(&group_name, &branch)?;
 
     if json {
         let json_output = serde_json::json!({
@@ -186,7 +228,13 @@ pub fn run_status(group_name: &str, branch: &str, json: bool) -> Result<()> {
 }
 
 /// Run `workmux group merge`
-pub fn run_merge(group_name: &str, branch: &str, into: Option<&str>, keep: bool) -> Result<()> {
+pub fn run_merge(
+    group_name: Option<String>,
+    branch: Option<String>,
+    into: Option<&str>,
+    keep: bool,
+) -> Result<()> {
+    let (group_name, branch) = resolve_group_args(group_name, branch)?;
     // Confirm unless piped
     if std::io::stdin().is_terminal() {
         eprintln!(
@@ -204,8 +252,8 @@ pub fn run_merge(group_name: &str, branch: &str, into: Option<&str>, keep: bool)
     }
 
     group::merge(GroupMergeArgs {
-        group_name,
-        branch,
+        group_name: &group_name,
+        branch: &branch,
         into,
         keep,
     })?;
@@ -215,7 +263,12 @@ pub fn run_merge(group_name: &str, branch: &str, into: Option<&str>, keep: bool)
 }
 
 /// Run `workmux group remove`
-pub fn run_remove(group_name: &str, branch: &str, force: bool) -> Result<()> {
+pub fn run_remove(
+    group_name: Option<String>,
+    branch: Option<String>,
+    force: bool,
+) -> Result<()> {
+    let (group_name, branch) = resolve_group_args(group_name, branch)?;
     // Confirm unless force or piped
     if !force && std::io::stdin().is_terminal() {
         eprintln!(
@@ -230,7 +283,7 @@ pub fn run_remove(group_name: &str, branch: &str, force: bool) -> Result<()> {
         }
     }
 
-    group::remove(group_name, branch, force)?;
+    group::remove(&group_name, &branch, force)?;
 
     println!("✓ Group workspace removed");
     Ok(())
