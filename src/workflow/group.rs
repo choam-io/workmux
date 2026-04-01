@@ -20,7 +20,7 @@ use crate::prompt::Prompt;
 const GROUPS_DIR: &str = ".local/share/workmux/groups";
 
 /// State file name within each group workspace
-const STATE_FILE: &str = ".workmux-group.yaml";
+pub const STATE_FILE: &str = ".workmux-group.yaml";
 
 /// State for a single repository in a group
 #[derive(Debug, Clone, Serialize, Deserialize)]
