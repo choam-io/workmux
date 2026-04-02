@@ -142,6 +142,9 @@ pub struct GroupConfig {
     /// Order in which to merge branches (repo directory names)
     #[serde(default)]
     pub merge_order: Option<Vec<String>>,
+    /// Dev environment configuration (codespace, etc.)
+    #[serde(default)]
+    pub dev_env: Option<crate::dev_env::DevEnvConfig>,
 }
 
 /// Configuration for the workmux tool, read from .workmux.yaml
