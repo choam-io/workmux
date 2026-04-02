@@ -1,3 +1,4 @@
+//! Port pool garbage collection utilities.
 //! Global port pool for allocating local ports across concurrent groups.
 //!
 //! Sequential allocation from a configurable range (default 10000-19999).
