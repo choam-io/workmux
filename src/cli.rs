@@ -697,6 +697,19 @@ enum Commands {
     /// Background update check (internal use)
     #[command(hide = true, name = "_check-update")]
     CheckUpdate,
+
+    /// Dev environment watcher process (internal use)
+    #[command(hide = true, name = "_dev-env-watcher")]
+    DevEnvWatcher {
+        #[arg(long)]
+        ssh_host: String,
+        #[arg(long)]
+        mappings: String,
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        branch: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -787,6 +800,10 @@ enum GroupCommands {
         #[arg(short = 'f', long)]
         force: bool,
     },
+
+    /// Manage the dev environment for a group workspace
+    #[command(name = "dev-env")]
+    DevEnv(command::dev_env::DevEnvArgs),
 }
 
 /// Check if the command should show the nerdfont setup prompt.
@@ -1002,6 +1019,7 @@ pub fn run() -> Result<()> {
                 branch,
                 force,
             } => command::group::run_remove(group_name, branch, force),
+            GroupCommands::DevEnv(args) => command::dev_env::run(args),
         },
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::SetBase { base } => command::set_base::run(&base),
@@ -1047,6 +1065,17 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Commands::CheckUpdate => command::update::run_background_check(),
+        Commands::DevEnvWatcher {
+            ssh_host,
+            mappings,
+            group,
+            branch,
+        } => {
+            let port_mappings: Vec<crate::dev_env::PortMapping> =
+                serde_json::from_str(&mappings)
+                    .context("Failed to parse port mappings")?;
+            crate::dev_env::watcher::run(&ssh_host, &port_mappings, &group, &branch)
+        }
     }
 }
 

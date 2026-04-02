@@ -52,6 +52,9 @@ pub struct GroupState {
     /// Whether this was created in headless mode
     #[serde(default)]
     pub headless: bool,
+    /// Dev environment state (codespace + tunnels + port mappings)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_env: Option<crate::dev_env::DevEnvState>,
 }
 
 impl GroupState {
@@ -237,6 +240,7 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
             .unwrap_or_default()
             .as_secs(),
         headless,
+        dev_env: None,
     };
     state.save(&ws_dir)?;
 
@@ -884,6 +888,7 @@ mod tests {
             merge_order: vec!["repo1".to_string()],
             created_at: 1234567890,
             headless: false,
+            dev_env: None,
         };
 
         state.save(tmp.path()).unwrap();
@@ -909,6 +914,7 @@ mod tests {
             merge_order: vec![],
             created_at: 0,
             headless: true,
+            dev_env: None,
         };
 
         state.save(tmp.path()).unwrap();

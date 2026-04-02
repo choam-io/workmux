@@ -4,6 +4,7 @@ mod cli;
 mod cmd;
 mod command;
 mod config;
+mod dev_env;
 mod git;
 mod github;
 mod llm;
