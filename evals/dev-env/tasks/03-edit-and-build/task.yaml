@@ -1,0 +1,10 @@
+name: edit-and-build
+description: >
+  Agent adds a doc comment to a source file locally, syncs via
+  git push, and verifies cargo check passes on the codespace.
+  Tests the full devloop: local edit → git push → remote pull → build.
+prompt: |
+  Add a doc comment "//! Port pool garbage collection utilities." to the
+  top of src/dev_env/ports.rs (before the existing module doc comment).
+  Then sync your change to the codespace and verify it compiles with
+  cargo check. Follow the devloop in the group config.

@@ -1,0 +1,8 @@
+name: run-remote-tests
+description: >
+  Agent runs cargo test for the dev_env module on the codespace.
+  Tests SSH command execution with correct remote workdir and
+  Rust toolchain usage.
+prompt: |
+  Run the dev_env unit tests (cargo test dev_env) on the codespace
+  and tell me how many tests passed.

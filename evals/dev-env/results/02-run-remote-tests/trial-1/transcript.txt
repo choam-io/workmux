@@ -1,0 +1,12 @@
+
+⚠  deck: issues in ~/.pi/agent/
+   - 1 broken symlink(s)
+   Fix: cd /Users/nodeselector/ghq/github.com/choam-io/deck && ./script/install --reset
+
+**14 tests passed**, 0 failed. All green.
+
+Breakdown:
+- `dev_env::ports::tests` — 7 tests (allocate_sequential, allocate_avoids_used, allocate_exhausted, allocate_zero, default_pool, release_frees_ports, release_nonexistent_is_noop, serde_roundtrip)
+- `dev_env::tests` — 6 tests (config_codespace_roundtrip, config_minimal_codespace, port_mapping_serde, state_from_config, state_roundtrip_with_runtime_fields, sync_strategy_serde)
+
+11 compiler warnings (unused imports, dead code) but nothing blocking.

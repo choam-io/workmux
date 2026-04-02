@@ -1,0 +1,11 @@
+
+⚠  deck: issues in ~/.pi/agent/
+   - 1 broken symlink(s)
+   Fix: cd /Users/nodeselector/ghq/github.com/choam-io/deck && ./script/install --reset
+
+Done. The doc comment is added, synced, and compiles clean (warnings are pre-existing, not from this change).
+
+**Summary:**
+- Added `//! Port pool garbage collection utilities.` as the first line of `src/dev_env/ports.rs`
+- Committed and pushed locally
+- Pulled on codespace and ran `cargo check` — passes with only pre-existing warnings

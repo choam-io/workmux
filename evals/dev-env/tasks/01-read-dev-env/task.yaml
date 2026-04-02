@@ -1,0 +1,9 @@
+name: read-dev-env
+description: >
+  Agent reads .workmux-group.yaml and reports the dev environment
+  configuration including codespace name, SSH host, port mappings,
+  and sync strategy. Tests skill discovery and state comprehension.
+prompt: |
+  Read the .workmux-group.yaml file in this workspace and tell me
+  the dev environment status: codespace name, SSH host, remote workdir,
+  port mappings, and sync strategy.

@@ -1,0 +1,6 @@
+
+⚠  deck: issues in ~/.pi/agent/
+   - 1 broken symlink(s)
+   Fix: cd /Users/nodeselector/ghq/github.com/choam-io/deck && ./script/install --reset
+
+VS Code should be opening now, connected to codespace `dev-env-eval-776v56wj9762x6jw` (`choam-io/workmux`, workdir `/workspaces/workmux`).

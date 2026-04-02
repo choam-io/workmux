@@ -1,0 +1,7 @@
+name: open-vscode
+description: >
+  Agent opens VS Code attached to the codespace.
+  Tests that the agent knows how to read the codespace name
+  from state and invoke gh codespace code.
+prompt: |
+  Open VS Code on the codespace so I can take a look at things directly.

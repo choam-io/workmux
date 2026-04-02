@@ -1,0 +1,22 @@
+
+⚠  deck: issues in ~/.pi/agent/
+   - 1 broken symlink(s)
+   Fix: cd /Users/nodeselector/ghq/github.com/choam-io/deck && ./script/install --reset
+
+**Dev environment status:**
+
+| Field | Value |
+|---|---|
+| **Codespace name** | `dev-env-eval-776v56wj9762x6jw` |
+| **SSH host** | `cs.dev-env-eval-776v56wj9762x6jw.workmux-target-followup` |
+| **Remote workdir** | `/workspaces/workmux` |
+| **Sync strategy** | `git-push` (local is source of truth, changes flow via git) |
+
+**Port mappings:**
+
+| Remote | Local |
+|---|---|
+| 8080 | 10000 |
+| 9090 | 10001 |
+
+The codespace is attached (since timestamp `1775103375`) with a watcher running at PID `91441`. This is a 4-repo group workspace (`cmux`, `workmux`, `deck`, `ns-dotfiles`) but the codespace targets `choam-io/workmux` specifically.

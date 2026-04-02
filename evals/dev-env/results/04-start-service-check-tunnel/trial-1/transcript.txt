@@ -1,0 +1,10 @@
+
+⚠  deck: issues in ~/.pi/agent/
+   - 1 broken symlink(s)
+   Fix: cd /Users/nodeselector/ghq/github.com/choam-io/deck && ./script/install --reset
+
+Working end to end.
+
+- **Server**: Python HTTP server on codespace port `8080`, serving `hello-eval` at `/`
+- **Local tunnel port**: `10000` (mapped from remote 8080 per `port_mappings` in group config)
+- **Response**: `hello-eval`

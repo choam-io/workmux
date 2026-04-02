@@ -1,0 +1,11 @@
+name: start-service-check-tunnel
+description: >
+  Agent starts an HTTP server on the codespace on port 8080 and
+  verifies it's accessible through the SSH tunnel at the mapped
+  local port. Tests port map awareness, service startup, and
+  tunnel usage.
+prompt: |
+  Start a simple HTTP server on the codespace on port 8080 that serves
+  the text "hello-eval" at the root path. Then verify you can reach it
+  through the port tunnel from localhost. Tell me the local port and
+  the response you got.
