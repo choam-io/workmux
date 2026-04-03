@@ -213,9 +213,31 @@ impl CmuxBackend {
             .map(|s| s.to_string())
     }
 
+    /// Resolve the cmux CLI binary path.
+    /// Checks: CMUX_CLI_PATH env → bundled in cmux.app → PATH fallback.
+    fn cli_path() -> &'static str {
+        use std::sync::OnceLock;
+        static PATH: OnceLock<String> = OnceLock::new();
+        PATH.get_or_init(|| {
+            // 1. Explicit env override
+            if let Ok(p) = std::env::var("CMUX_CLI_PATH") {
+                if std::path::Path::new(&p).exists() {
+                    return p;
+                }
+            }
+            // 2. Bundled CLI inside cmux.app
+            let bundled = "/Applications/cmux.app/Contents/Resources/bin/cmux";
+            if std::path::Path::new(bundled).exists() {
+                return bundled.to_string();
+            }
+            // 3. Fall back to PATH lookup
+            "cmux".to_string()
+        })
+    }
+
     /// Run a cmux CLI command, returning an error with context on failure.
     fn cmux_cmd(&self, args: &[&str]) -> Result<()> {
-        Cmd::new("cmux")
+        Cmd::new(Self::cli_path())
             .args(args)
             .run()
             .with_context(|| format!("cmux command failed: {:?}", args))?;
@@ -228,7 +250,7 @@ impl CmuxBackend {
     /// blocked waiting for each subprocess to finish.
     fn cmux_fire(&self, args: &[&str]) {
         use std::process::{Command, Stdio};
-        let mut cmd = Command::new("cmux");
+        let mut cmd = Command::new(Self::cli_path());
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -238,7 +260,7 @@ impl CmuxBackend {
 
     /// Run a cmux CLI command and capture stdout.
     fn cmux_query(&self, args: &[&str]) -> Result<String> {
-        Cmd::new("cmux")
+        Cmd::new(Self::cli_path())
             .args(args)
             .run_and_capture_stdout()
             .with_context(|| format!("cmux query failed: {:?}", args))
@@ -541,9 +563,10 @@ impl Multiplexer for CmuxBackend {
 
     fn schedule_window_close(&self, full_name: &str, delay: Duration) -> Result<()> {
         let name = full_name.to_string();
+        let cli = Self::cli_path().to_string();
         thread::spawn(move || {
             thread::sleep(delay);
-            let _ = Cmd::new("cmux")
+            let _ = Cmd::new(&cli)
                 .args(&["close-workspace", "--workspace", &name])
                 .run();
         });
