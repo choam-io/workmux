@@ -220,6 +220,23 @@ pub struct WindowConfig {
     pub panes: Option<Vec<PaneConfig>>,
 }
 
+/// Configuration for a single repository in a group
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GroupRepoConfig {
+    /// Path to the repository (supports ~ expansion)
+    pub path: String,
+}
+
+/// Configuration for a group of repositories
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GroupConfig {
+    /// List of repositories in this group
+    pub repos: Vec<GroupRepoConfig>,
+    /// Dev environment configuration (codespace, etc.)
+    #[serde(default)]
+    pub dev_env: Option<crate::dev_env::DevEnvConfig>,
+}
+
 /// Configuration for the workmux tool, read from .workmux.yaml
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Config {
@@ -341,6 +358,11 @@ pub struct Config {
     /// Container sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
+
+    /// Cross-repo worktree groups.
+    /// Groups are global-only (ignored in project .workmux.yaml).
+    #[serde(default)]
+    pub groups: Option<std::collections::HashMap<String, GroupConfig>>,
 }
 
 /// A named agent entry: either a plain command string or a `{ command, type }` object.
@@ -1787,6 +1809,7 @@ impl Config {
             nerdfont,
             auto_update_check,
             prompt_file_only,
+            groups,
         );
 
         // Layouts: merge maps by key so project layouts extend global ones

@@ -58,6 +58,37 @@ pub fn create_worktree(
     Ok(())
 }
 
+/// Create a worktree in a specific repository (for cross-repo group operations).
+pub fn create_worktree_in(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    create_branch: bool,
+    base_branch: Option<&str>,
+) -> Result<()> {
+    let path_str = worktree_path
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid worktree path"))?;
+
+    let mut cmd = Cmd::new("git")
+        .workdir(repo_path)
+        .arg("worktree")
+        .arg("add");
+
+    if create_branch {
+        cmd = cmd.arg("-b").arg(branch_name).arg(path_str);
+        if let Some(base) = base_branch {
+            cmd = cmd.arg(base);
+        }
+    } else {
+        cmd = cmd.arg(path_str).arg(branch_name);
+    }
+
+    cmd.run().context("Failed to create worktree")?;
+
+    Ok(())
+}
+
 /// Prune stale worktree metadata.
 pub fn prune_worktrees_in(git_common_dir: &Path) -> Result<()> {
     Cmd::new("git")
@@ -305,5 +336,45 @@ pub fn get_main_worktree_root() -> Result<PathBuf> {
         Ok(path.clone())
     } else {
         Err(anyhow!("No main worktree found"))
+    }
+}
+
+/// Get the main worktree root for a repository at a specific path.
+pub fn get_main_worktree_root_in(repo_path: &Path) -> Result<PathBuf> {
+    let list_str = Cmd::new("git")
+        .workdir(repo_path)
+        .args(&["worktree", "list", "--porcelain"])
+        .run_and_capture_stdout()
+        .context("Failed to list worktrees while locating main worktree")?;
+
+    if let Some(first_block) = list_str.trim().split("\n\n").next() {
+        let mut path: Option<PathBuf> = None;
+        let mut is_bare = false;
+
+        for line in first_block.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if line.trim() == "bare" {
+                is_bare = true;
+            }
+        }
+
+        if is_bare && let Some(p) = path {
+            return Ok(p);
+        }
+    }
+
+    let worktrees = parse_worktree_list_porcelain(&list_str)?;
+
+    for (path, _) in &worktrees {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+
+    if let Some((path, _)) = worktrees.first() {
+        Ok(path.clone())
+    } else {
+        Err(anyhow!("No main worktree found in {}", repo_path.display()))
     }
 }

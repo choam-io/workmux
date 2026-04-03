@@ -4,6 +4,7 @@
 //! with different terminal multiplexers (tmux, WezTerm) interchangeably.
 
 pub mod agent;
+pub mod cmux;
 pub mod handle;
 pub mod handshake;
 pub mod kitty;
@@ -216,6 +217,16 @@ pub trait Multiplexer: Send + Sync {
 
     /// Send a single key to a pane
     fn send_key(&self, pane_id: &str, key: &str) -> Result<()>;
+
+    /// Send raw text to a pane (no newline appended).
+    /// Used for batched character input from the dashboard.
+    fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        // Default: send each char as a key (backends can override for efficiency)
+        for c in text.chars() {
+            self.send_key(pane_id, &c.to_string())?;
+        }
+        Ok(())
+    }
 
     /// Paste multiline content to a pane (using bracketed paste)
     fn paste_multiline(&self, pane_id: &str, content: &str) -> Result<()>;
@@ -438,6 +449,20 @@ pub trait Multiplexer: Send + Sync {
                 };
 
                 let _ = self.clear_pane(&spawned_id);
+
+                // After handshake + clear, verify the shell prompt is visible before
+                // sending the command. Protects against the race where handshake signals
+                // before the exec'd shell finishes loading (especially on cmux where
+                // respawn_pane is not a real process replacement).
+                for _ in 0..30 {
+                    if let Some(screen) = self.capture_pane(&spawned_id, 5) {
+                        if !screen.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
                 self.send_keys(&spawned_id, &final_command)?;
 
                 // Set working status for agent panes with injected prompts
@@ -570,6 +595,14 @@ pub trait Multiplexer: Send + Sync {
             Some(_) => Ok(true), // Valid
         }
     }
+
+    /// Discover agent sessions that don't have state files yet.
+    /// Called by the dashboard before loading state to ensure idle
+    /// agents are visible. Default is no-op; backends override to
+    /// scan for agent signatures (e.g. title patterns).
+    fn discover_agents(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Detect which backend to use based on environment.
@@ -594,10 +627,15 @@ pub fn detect_backend() -> BackendType {
             Ok(bt) => return bt,
             Err(_) => {
                 eprintln!(
-                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij"
+                    "workmux: invalid WORKMUX_BACKEND={val:?}, expected tmux|wezterm|kitty|zellij|cmux"
                 );
             }
         }
+    }
+
+    // Check cmux first -- if we're inside cmux, CMUX_WORKSPACE_ID is set
+    if std::env::var("CMUX_WORKSPACE_ID").is_ok() {
+        return BackendType::Cmux;
     }
 
     resolve_backend(
@@ -636,6 +674,7 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
         BackendType::WezTerm => Arc::new(wezterm::WezTermBackend::new()),
         BackendType::Kitty => Arc::new(kitty::KittyBackend::new()),
         BackendType::Zellij => Arc::new(zellij::ZellijBackend::new()),
+        BackendType::Cmux => Arc::new(cmux::CmuxBackend::new()),
     }
 }
 

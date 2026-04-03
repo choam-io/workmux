@@ -119,6 +119,8 @@ pub enum BackendType {
     Kitty,
     /// Zellij backend
     Zellij,
+    /// cmux backend (choam-io/cmux native macOS terminal)
+    Cmux,
 }
 
 impl std::fmt::Display for BackendType {
@@ -128,6 +130,7 @@ impl std::fmt::Display for BackendType {
             BackendType::WezTerm => write!(f, "wezterm"),
             BackendType::Kitty => write!(f, "kitty"),
             BackendType::Zellij => write!(f, "zellij"),
+            BackendType::Cmux => write!(f, "cmux"),
         }
     }
 }
@@ -141,6 +144,7 @@ impl std::str::FromStr for BackendType {
             "wezterm" => Ok(BackendType::WezTerm),
             "kitty" => Ok(BackendType::Kitty),
             "zellij" => Ok(BackendType::Zellij),
+            "cmux" => Ok(BackendType::Cmux),
             other => Err(format!("unknown backend: {}", other)),
         }
     }

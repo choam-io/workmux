@@ -5,6 +5,8 @@ mod cli;
 mod cmd;
 mod command;
 mod config;
+#[allow(dead_code)]
+mod dev_env;
 mod git;
 mod github;
 mod llm;

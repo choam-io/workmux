@@ -173,6 +173,7 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::ExitInputMode => {
+            app.flush_input_buffer();
             app.input_mode = false;
             false
         }
@@ -333,9 +334,18 @@ pub fn apply_action(app: &mut App, action: Action) -> bool {
 
         // Input mode
         Action::SendKey(key) => {
-            app.send_key_to_selected(&key);
-            app.refresh_preview();
-            true // Signal that preview was refreshed
+            // Named keys (Enter, backspace, etc.) flush the buffer first
+            // then send immediately.
+            if key.len() == 1 && key.chars().next().map_or(false, |c| !c.is_control()) {
+                app.input_buffer.push_str(&key);
+            } else {
+                app.flush_input_buffer();
+                app.send_key_to_selected(&key);
+            }
+            // Don't refresh preview on every keystroke -- the periodic
+            // refresh (100ms in input mode) handles it. Per-key refresh
+            // was calling capture_pane (subprocess) on every char.
+            false
         }
 
         // Diff view

@@ -595,6 +595,25 @@ enum Commands {
     /// Update workmux to the latest version
     Update,
 
+    /// Cross-repo worktree groups
+    Group {
+        #[command(subcommand)]
+        command: GroupCommands,
+    },
+
+    /// Dev environment watcher process (internal use)
+    #[command(hide = true, name = "_dev-env-watcher")]
+    DevEnvWatcher {
+        #[arg(long)]
+        ssh_host: String,
+        #[arg(long)]
+        mappings: String,
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        branch: String,
+    },
+
     /// Toggle a live agent status sidebar in tmux
     Sidebar {
         /// Scope sidebar to current tmux session only
@@ -729,6 +748,71 @@ enum Commands {
     /// Background update check (internal use)
     #[command(hide = true, name = "_check-update")]
     CheckUpdate,
+}
+
+#[derive(Subcommand)]
+enum GroupCommands {
+    /// Create worktrees across all repos in a group
+    Add {
+        /// Group name (defined in ~/.config/workmux/config.yaml)
+        group_name: String,
+        /// Branch name to create
+        branch: String,
+        /// Prompt text to inject into the agent
+        #[arg(short = 'p', long = "prompt")]
+        prompt: Option<String>,
+        /// Read prompt from a file
+        #[arg(short = 'P', long = "prompt-file")]
+        prompt_file: Option<std::path::PathBuf>,
+        /// Open an editor to write the prompt
+        #[arg(short = 'e', long = "prompt-editor")]
+        prompt_editor: bool,
+        /// Don't focus the new window
+        #[arg(long)]
+        background: bool,
+    },
+    /// List all active group workspaces
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show status of a group workspace
+    Status {
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
+        /// Branch name (detected from cwd if omitted)
+        branch: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Merge all branches in a group and clean up
+    Merge {
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
+        /// Branch name (detected from cwd if omitted)
+        branch: Option<String>,
+        /// Target branch to merge into (default: main)
+        #[arg(long)]
+        into: Option<String>,
+        /// Keep worktrees after merge
+        #[arg(short, long)]
+        keep: bool,
+    },
+    /// Remove a group workspace (worktrees and branches)
+    Remove {
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
+        /// Branch name (detected from cwd if omitted)
+        branch: Option<String>,
+        /// Force removal even with uncommitted changes
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Manage the dev environment for a group workspace
+    #[command(name = "dev-env")]
+    DevEnv(command::dev_env::DevEnvArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -949,6 +1033,51 @@ pub fn run() -> Result<()> {
         Commands::Docs => command::docs::run(),
         Commands::Changelog => command::changelog::run(),
         Commands::Update => command::update::run(),
+        Commands::Group { command } => match command {
+            GroupCommands::Add {
+                group_name,
+                branch,
+                prompt,
+                prompt_file,
+                prompt_editor,
+                background,
+            } => command::group::run_add(
+                &group_name,
+                &branch,
+                prompt.as_deref(),
+                prompt_file.as_deref(),
+                prompt_editor,
+                background,
+            ),
+            GroupCommands::List { json } => command::group::run_list(json),
+            GroupCommands::Status {
+                group_name,
+                branch,
+                json,
+            } => command::group::run_status(group_name, branch, json),
+            GroupCommands::Merge {
+                group_name,
+                branch,
+                into,
+                keep,
+            } => command::group::run_merge(group_name, branch, into.as_deref(), keep),
+            GroupCommands::Remove {
+                group_name,
+                branch,
+                force,
+            } => command::group::run_remove(group_name, branch, force),
+            GroupCommands::DevEnv(args) => command::dev_env::run(args),
+        },
+        Commands::DevEnvWatcher {
+            ssh_host,
+            mappings,
+            group,
+            branch,
+        } => {
+            let port_mappings: Vec<crate::dev_env::PortMapping> =
+                serde_json::from_str(&mappings)?;
+            crate::dev_env::watcher::run(&ssh_host, &port_mappings, &group, &branch)
+        }
         Commands::Sidebar { session, action } => match action {
             Some(SidebarAction::Next) => {
                 command::sidebar::navigate(command::sidebar::NavAction::Next)
