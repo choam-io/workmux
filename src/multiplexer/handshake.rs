@@ -299,7 +299,7 @@ impl Drop for UnixPipeHandshake {
 }
 
 /// No-op handshake for backends where respawn_pane handles readiness internally
-/// (e.g., nsmux polls read-screen for prompt readiness).
+/// (e.g., cmux polls read-screen for prompt readiness).
 pub struct NoopHandshake;
 
 impl PaneHandshake for NoopHandshake {

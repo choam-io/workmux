@@ -1,13 +1,13 @@
-//! nsmux backend implementation for the Multiplexer trait.
+//! cmux backend implementation for the Multiplexer trait.
 //!
-//! nsmux (choam-io/cmux) is a native macOS terminal with workspaces, panes,
-//! and a Unix socket CLI. This backend maps workmux operations to nsmux CLI
+//! cmux (choam-io/cmux) is a native macOS terminal with workspaces, panes,
+//! and a Unix socket CLI. This backend maps workmux operations to cmux CLI
 //! commands.
 //!
 //! Terminology mapping:
-//! - workmux "window" = nsmux "workspace" (a named tab in the sidebar)
-//! - workmux "pane"   = nsmux "surface" or "pane" (a terminal split)
-//! - workmux "session"= nsmux "workspace" (nsmux has no separate session concept)
+//! - workmux "window" = cmux "workspace" (a named tab in the sidebar)
+//! - workmux "pane"   = cmux "surface" or "pane" (a terminal split)
+//! - workmux "session"= cmux "workspace" (cmux has no separate session concept)
 
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
@@ -37,8 +37,8 @@ struct TreeCache {
 
 const TREE_CACHE_TTL: Duration = Duration::from_secs(2);
 
-/// nsmux backend implementation.
-pub struct NsmuxBackend {
+/// cmux backend implementation.
+pub struct CmuxBackend {
     tree_cache: Mutex<Option<TreeCache>>,
     /// Blocking socket for queries (capture_pane, etc.)
     query_socket: Mutex<Option<SocketConn>>,
@@ -50,25 +50,25 @@ pub struct NsmuxBackend {
     surface_uuids: Mutex<HashMap<String, String>>,
 }
 
-/// A buffered Unix socket connection to nsmux.
+/// A buffered Unix socket connection to cmux.
 struct SocketConn {
     writer: UnixStream,
     reader: BufReader<UnixStream>,
 }
 
-impl std::fmt::Debug for NsmuxBackend {
+impl std::fmt::Debug for CmuxBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NsmuxBackend").finish()
+        f.debug_struct("CmuxBackend").finish()
     }
 }
 
-impl Default for NsmuxBackend {
+impl Default for CmuxBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl NsmuxBackend {
+impl CmuxBackend {
     pub fn new() -> Self {
         Self {
             tree_cache: Mutex::new(None),
@@ -78,11 +78,11 @@ impl NsmuxBackend {
         }
     }
 
-    /// Get the nsmux socket path.
+    /// Get the cmux socket path.
     fn socket_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(home)
-            .join("Library/Application Support/nsmux/nsmux.sock")
+            .join("Library/Application Support/cmux/cmux.sock")
     }
 
     /// Resolve a surface:N ref to its UUID for v2 API calls.
@@ -101,9 +101,9 @@ impl NsmuxBackend {
         // Connect if not connected
         if guard.is_none() {
             let path = Self::socket_path();
-            debug!(path = %path.display(), "nsmux: connecting query socket");
+            debug!(path = %path.display(), "cmux: connecting query socket");
             let stream = UnixStream::connect(&path)
-                .with_context(|| format!("failed to connect to nsmux socket at {:?}", path))?;
+                .with_context(|| format!("failed to connect to cmux socket at {:?}", path))?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             let reader = BufReader::new(stream.try_clone()?);
@@ -144,7 +144,7 @@ impl NsmuxBackend {
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            Err(anyhow!("nsmux socket: {}", msg))
+            Err(anyhow!("cmux socket: {}", msg))
         }
     }
 
@@ -196,7 +196,7 @@ impl NsmuxBackend {
 
     /// Resolve a surface UUID (from $CMUX_SURFACE_ID) to a `surface:N` ref.
     ///
-    /// nsmux exposes UUIDs in env vars but uses `surface:N` short refs in
+    /// cmux exposes UUIDs in env vars but uses `surface:N` short refs in
     /// tree output and most CLI commands. workmux needs a single canonical
     /// identifier, so we normalise to `surface:N` everywhere.
     fn resolve_surface_ref(&self, uuid: &str) -> Option<String> {
@@ -362,7 +362,7 @@ impl NsmuxBackend {
     }
 
     /// Strip Private Use Area (nerdfont) characters from a string.
-    /// nsmux's native macOS sidebar can't render these glyphs.
+    /// cmux's native macOS sidebar can't render these glyphs.
     fn strip_pua(s: &str) -> String {
         s.chars()
             .filter(|c| {
@@ -424,9 +424,9 @@ impl NsmuxBackend {
     }
 }
 
-impl Multiplexer for NsmuxBackend {
+impl Multiplexer for CmuxBackend {
     fn name(&self) -> &'static str {
-        "nsmux"
+        "cmux"
     }
 
     // === Server/Session ===
@@ -442,7 +442,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn active_pane_id(&self) -> Option<String> {
-        // Query nsmux for the currently focused surface
+        // Query cmux for the currently focused surface
         self.cmux_query(&["identify"])
             .ok()
             .and_then(|output| {
@@ -467,7 +467,7 @@ impl Multiplexer for NsmuxBackend {
         let workspace_id = std::env::var("CMUX_WORKSPACE_ID")
             .unwrap_or_default();
         if workspace_id.is_empty() {
-            return Err(anyhow!("Not running inside nsmux (CMUX_WORKSPACE_ID not set)"));
+            return Err(anyhow!("Not running inside cmux (CMUX_WORKSPACE_ID not set)"));
         }
         // Read the current directory from the focused surface
         let _output = self.cmux_query(&[
@@ -507,7 +507,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn create_session(&self, params: CreateSessionParams) -> Result<String> {
-        // nsmux doesn't have sessions separate from workspaces.
+        // cmux doesn't have sessions separate from workspaces.
         // Create a workspace instead.
         self.create_window(CreateWindowParams {
             prefix: params.prefix,
@@ -620,7 +620,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn get_all_session_names(&self) -> Result<HashSet<String>> {
-        // nsmux has no separate sessions -- workspaces are the top-level unit
+        // cmux has no separate sessions -- workspaces are the top-level unit
         self.get_all_window_names()
     }
 
@@ -694,7 +694,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn respawn_pane(&self, pane_id: &str, _cwd: &Path, _cmd: Option<&str>) -> Result<String> {
-        // nsmux's `respawn-pane` is just `surface.send_text` -- it types text into
+        // cmux's `respawn-pane` is just `surface.send_text` -- it types text into
         // the existing shell rather than killing and restarting the process like tmux.
         // The handshake script would arrive before the shell prompt is ready, causing
         // the FIFO pipe to never be written and the handshake to time out.
@@ -814,7 +814,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn create_handshake(&self) -> Result<Box<dyn PaneHandshake>> {
-        // nsmux's respawn_pane polls read-screen for shell readiness instead of
+        // cmux's respawn_pane polls read-screen for shell readiness instead of
         // using a FIFO handshake (see respawn_pane comment). Return a no-op
         // handshake so the caller's wait() returns immediately.
         Ok(Box::new(NoopHandshake))
@@ -823,8 +823,8 @@ impl Multiplexer for NsmuxBackend {
     // === Status ===
 
     fn set_status(&self, pane_id: &str, icon: &str, _auto_clear_on_focus: bool) -> Result<()> {
-        // Map workmux emoji icons to nsmux native status API (SF Symbols + color)
-        let (value, nsmux_icon, color) = match icon {
+        // Map workmux emoji icons to cmux native status API (SF Symbols + color)
+        let (value, cmux_icon, color) = match icon {
             "🤖" => ("Working", "bolt.fill", "#4C8DFF"),
             "💬" => ("Waiting", "bell.fill", "#FFB84C"),
             "✅" => ("Done", "checkmark.circle.fill", "#4CAF50"),
@@ -835,7 +835,7 @@ impl Multiplexer for NsmuxBackend {
         let key = format!("workmux_{}", pane_id);
         let mut args = vec![
             "set-status", &key, value,
-            "--icon", nsmux_icon,
+            "--icon", cmux_icon,
             "--color", color,
         ];
         let ws_val;
@@ -863,7 +863,7 @@ impl Multiplexer for NsmuxBackend {
     }
 
     fn ensure_status_format(&self, _pane_id: &str) -> Result<()> {
-        // nsmux handles status display natively -- no format string needed
+        // cmux handles status display natively -- no format string needed
         Ok(())
     }
 
@@ -955,13 +955,13 @@ impl Multiplexer for NsmuxBackend {
     fn instance_id(&self) -> String {
         // Use the socket path as instance identifier
         std::env::var("CMUX_SOCKET_PATH")
-            .unwrap_or_else(|_| "nsmux-default".to_string())
+            .unwrap_or_else(|_| "cmux-default".to_string())
     }
 
     fn server_boot_id(&self) -> Result<Option<String>> {
         // Use the socket file's inode as a boot ID. The inode changes
-        // every time nsmux restarts (new socket file). This lets us
-        // detect stale state files from previous nsmux sessions.
+        // every time cmux restarts (new socket file). This lets us
+        // detect stale state files from previous cmux sessions.
         let path = Self::socket_path();
         let metadata = std::fs::metadata(&path)?;
         use std::os::unix::fs::MetadataExt;
@@ -986,7 +986,7 @@ impl Multiplexer for NsmuxBackend {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        debug!(surfaces = live_panes.len(), "nsmux: discover_agents scanning surfaces");
+        debug!(surfaces = live_panes.len(), "cmux: discover_agents scanning surfaces");
         for (surface_ref, info) in &live_panes {
             // Check if title indicates a pi session (π prefix)
             let is_agent = info.title.as_ref()
@@ -1006,7 +1006,7 @@ impl Multiplexer for NsmuxBackend {
                 continue;
             }
 
-            info!(surface = %surface_ref, title = ?info.title, "nsmux: discovered agent session without state");
+            info!(surface = %surface_ref, title = ?info.title, "cmux: discovered agent session without state");
             // Create state for this discovered agent
             let state = AgentState {
                 pane_key,
@@ -1106,7 +1106,7 @@ impl Multiplexer for NsmuxBackend {
 
                                 result.insert(surface_ref, LivePaneInfo {
                                     pid: None,
-                                    current_command: None, // nsmux doesn't expose process info
+                                    current_command: None, // cmux doesn't expose process info
                                     working_dir: PathBuf::from("/"),
                                     title,
                                     session: None,
@@ -1119,9 +1119,9 @@ impl Multiplexer for NsmuxBackend {
             }
         }
 
-        debug!(surfaces = result.len(), "nsmux: get_all_live_pane_info");
+        debug!(surfaces = result.len(), "cmux: get_all_live_pane_info");
         for (ref_str, info) in &result {
-            debug!(surface = %ref_str, title = ?info.title, "nsmux: live surface");
+            debug!(surface = %ref_str, title = ?info.title, "cmux: live surface");
         }
         Ok(result)
     }

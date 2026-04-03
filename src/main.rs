@@ -29,8 +29,8 @@ use tracing::{error, info};
 fn main() -> Result<()> {
     logger::init()?;
 
-    // Build a root span with nsmux correlation context.
-    // These env vars are set by nsmux for every terminal surface.
+    // Build a root span with cmux correlation context.
+    // These env vars are set by cmux for every terminal surface.
     let surface_id = std::env::var("CMUX_SURFACE_ID").unwrap_or_default();
     let workspace_id = std::env::var("CMUX_WORKSPACE_ID").unwrap_or_default();
     let cwd = std::env::current_dir()

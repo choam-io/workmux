@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make workmux's worktree creation work **without a multiplexer** (no tmux, no nsmux). Today `workflow::create` always calls `context.ensure_mux_running()` and builds a `MuxHandle`. This refactor makes the mux layer optional so worktrees can be created and agents spawned as background processes.
+Make workmux's worktree creation work **without a multiplexer** (no tmux, no cmux). Today `workflow::create` always calls `context.ensure_mux_running()` and builds a `MuxHandle`. This refactor makes the mux layer optional so worktrees can be created and agents spawned as background processes.
 
 This is the foundational change that enables:
 - `workmux group` (#1) working headless

@@ -83,7 +83,7 @@ pub fn persist_agent_update(
     let state = AgentState {
         pane_key,
         // Prefer the live pane's working_dir if it looks like a real path.
-        // nsmux can't report surface CWD, so get_live_pane_info falls back
+        // cmux can't report surface CWD, so get_live_pane_info falls back
         // to "/" or the workmux process CWD. When called from set-window-status
         // (inside pi), std::env::current_dir() is the agent's actual CWD.
         workdir: if live_info.working_dir == PathBuf::from("/") {
