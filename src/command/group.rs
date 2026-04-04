@@ -259,6 +259,50 @@ pub fn run_merge(
     Ok(())
 }
 
+/// Run `workmux group open`
+pub fn run_open(
+    group_name: Option<String>,
+    branch: Option<String>,
+    prompt_inline: Option<&str>,
+    prompt_file: Option<&std::path::Path>,
+    prompt_editor: bool,
+    background: bool,
+    continue_session: bool,
+) -> Result<()> {
+    let (group_name, branch) = resolve_group_args(group_name, branch)?;
+
+    // Load prompt if provided
+    let prompt = load_prompt(&PromptLoadArgs {
+        prompt_editor,
+        prompt_inline,
+        prompt_file: prompt_file.map(|p| p.to_path_buf()).as_ref(),
+    })?;
+
+    let result = group::open(group::GroupOpenArgs {
+        group_name: &group_name,
+        branch: &branch,
+        prompt: prompt.as_ref(),
+        background,
+        continue_session,
+    })?;
+
+    if result.did_switch {
+        println!(
+            "✓ Switched to existing window for group '{}' (branch: {})",
+            group_name, branch
+        );
+    } else {
+        println!(
+            "✓ Opened window for group '{}' (branch: {})\n  Workspace: {}",
+            group_name,
+            branch,
+            result.workspace_dir.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// Run `workmux group remove`
 pub fn run_remove(
     group_name: Option<String>,

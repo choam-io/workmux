@@ -752,6 +752,28 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum GroupCommands {
+    /// Open the mux window for an existing group workspace
+    Open {
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
+        /// Branch name (detected from cwd if omitted)
+        branch: Option<String>,
+        /// Prompt text to inject into the agent
+        #[arg(short = 'p', long = "prompt")]
+        prompt: Option<String>,
+        /// Read prompt from a file
+        #[arg(short = 'P', long = "prompt-file")]
+        prompt_file: Option<std::path::PathBuf>,
+        /// Open an editor to write the prompt
+        #[arg(short = 'e', long = "prompt-editor")]
+        prompt_editor: bool,
+        /// Don't focus the window
+        #[arg(long)]
+        background: bool,
+        /// Resume the agent's most recent conversation
+        #[arg(short = 'c', long = "continue")]
+        continue_session: bool,
+    },
     /// Create worktrees across all repos in a group
     Add {
         /// Group name (defined in ~/.config/workmux/config.yaml)
@@ -1048,6 +1070,23 @@ pub fn run() -> Result<()> {
                 prompt_file.as_deref(),
                 prompt_editor,
                 background,
+            ),
+            GroupCommands::Open {
+                group_name,
+                branch,
+                prompt,
+                prompt_file,
+                prompt_editor,
+                background,
+                continue_session,
+            } => command::group::run_open(
+                group_name,
+                branch,
+                prompt.as_deref(),
+                prompt_file.as_deref(),
+                prompt_editor,
+                background,
+                continue_session,
             ),
             GroupCommands::List { json } => command::group::run_list(json),
             GroupCommands::Status {

@@ -245,7 +245,7 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
         let mux = create_backend(detect_backend());
         if mux.is_running()? {
             let repo_names: Vec<String> = repo_states.iter().map(|r| r.symlink_name.clone()).collect();
-            launch_group_agent(&ws_dir, group_name, branch, &repo_names, prompt, background, mux.as_ref())?;
+            launch_group_agent(&ws_dir, group_name, branch, &repo_names, prompt, background, false, mux.as_ref())?;
         } else if !background {
             eprintln!(
                 "workmux: no multiplexer running, created workspace at {}",
@@ -326,6 +326,101 @@ fn create_worktree_in_repo(repo_path: &Path, branch: &str) -> Result<PathBuf> {
 }
 
 /// Launch an agent in the group workspace
+/// Arguments for group open
+pub struct GroupOpenArgs<'a> {
+    pub group_name: &'a str,
+    pub branch: &'a str,
+    pub prompt: Option<&'a Prompt>,
+    pub background: bool,
+    pub continue_session: bool,
+}
+
+/// Result from group open
+pub struct GroupOpenResult {
+    pub workspace_dir: PathBuf,
+    pub did_switch: bool,
+}
+
+/// Open (or switch to) the mux window for an existing group workspace.
+///
+/// If the window already exists, switches to it. Otherwise creates a new
+/// window, launches the agent, and optionally injects a prompt.
+pub fn open(args: GroupOpenArgs) -> Result<GroupOpenResult> {
+    let GroupOpenArgs {
+        group_name,
+        branch,
+        prompt,
+        background,
+        continue_session,
+    } = args;
+
+    info!(group = group_name, branch = branch, "group:open:start");
+
+    let ws_dir = workspace_dir(group_name, branch)?;
+    if !ws_dir.exists() {
+        bail!(
+            "Group workspace not found: {}--{}\n\
+             Use 'workmux group add {} <branch>' to create one.",
+            group_name,
+            slug::slugify(branch),
+            group_name
+        );
+    }
+
+    let state = GroupState::load(&ws_dir)?;
+    let repo_names: Vec<String> = state.repos.iter().map(|r| r.symlink_name.clone()).collect();
+
+    // Write prompt file if provided
+    if let Some(p) = prompt {
+        let prompt_path = ws_dir.join(".workmux").join("PROMPT.md");
+        if let Some(parent) = prompt_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = p.read_content()?;
+        fs::write(&prompt_path, &content)?;
+    }
+
+    let mux = create_backend(detect_backend());
+    if !mux.is_running()? {
+        if !background {
+            eprintln!(
+                "workmux: no multiplexer running, workspace at {}",
+                ws_dir.display()
+            );
+        }
+        return Ok(GroupOpenResult {
+            workspace_dir: ws_dir,
+            did_switch: false,
+        });
+    }
+
+    let did_switch = launch_group_agent(
+        &ws_dir,
+        group_name,
+        branch,
+        &repo_names,
+        prompt,
+        background,
+        continue_session,
+        mux.as_ref(),
+    )?;
+
+    info!(
+        group = group_name,
+        branch = branch,
+        did_switch = did_switch,
+        "group:open:complete"
+    );
+
+    Ok(GroupOpenResult {
+        workspace_dir: ws_dir,
+        did_switch,
+    })
+}
+
+/// Launch an agent in the group workspace.
+///
+/// Returns `true` if switched to an existing window, `false` if a new one was created.
 fn launch_group_agent(
     workspace_dir: &Path,
     group_name: &str,
@@ -333,8 +428,9 @@ fn launch_group_agent(
     repo_names: &[String],
     prompt: Option<&Prompt>,
     background: bool,
+    continue_session: bool,
     mux: &dyn Multiplexer,
-) -> Result<()> {
+) -> Result<bool> {
     // Load config for agent setup
     let config = Config::load(None)?;
 
@@ -352,7 +448,7 @@ fn launch_group_agent(
         if !background {
             mux_handle.select()?;
         }
-        return Ok(());
+        return Ok(true);
     }
 
     use crate::multiplexer::CreateWindowParams;
@@ -366,15 +462,14 @@ fn launch_group_agent(
     // Set group info status pill on the NEW workspace (resolve via surface ref)
     set_group_info_status(&surface_ref, group_name, repo_names);
 
-    // Build agent command with prompt injection if provided
-    let agent_command = if prompt.is_some() {
-        // The prompt file was already written to .workmux/PROMPT.md in add()
-        let prompt_path = workspace_dir.join(".workmux").join("PROMPT.md");
-        let prompt_arg = agent_profile.prompt_argument(&prompt_path.to_string_lossy());
-        format!("{} {}", agent_cmd, prompt_arg)
-    } else {
-        agent_cmd.to_string()
-    };
+    // Build agent command with prompt/continue injection
+    let agent_command = build_agent_command(
+        agent_cmd,
+        agent_profile,
+        workspace_dir,
+        prompt,
+        continue_session,
+    );
 
     // Wait for shell to be ready, then send the agent command
     for _ in 0..30 {
@@ -401,7 +496,32 @@ fn launch_group_agent(
         mux_handle.select()?;
     }
 
-    Ok(())
+    Ok(false)
+}
+
+/// Build the agent command string with optional prompt and continue flags.
+fn build_agent_command(
+    agent_cmd: &str,
+    agent_profile: &dyn crate::multiplexer::agent::AgentProfile,
+    workspace_dir: &Path,
+    prompt: Option<&Prompt>,
+    continue_session: bool,
+) -> String {
+    let mut cmd = agent_cmd.to_string();
+
+    if continue_session {
+        if let Some(flag) = agent_profile.continue_flag() {
+            cmd = format!("{} {}", cmd, flag);
+        }
+    }
+
+    if prompt.is_some() {
+        let prompt_path = workspace_dir.join(".workmux").join("PROMPT.md");
+        let prompt_arg = agent_profile.prompt_argument(&prompt_path.to_string_lossy());
+        cmd = format!("{} {}", cmd, prompt_arg);
+    }
+
+    cmd
 }
 
 /// Set a status pill showing group name and repos on the new group workspace.
