@@ -268,8 +268,19 @@ impl CmuxBackend {
     }
 
     /// Get all workspace names by parsing `cmux list-workspaces` output.
+    ///
+    /// If cmux's TabManager isn't available (no workspace open yet), this
+    /// bootstraps it by opening a window first, then retries.
     fn list_workspaces(&self) -> Result<Vec<(String, String)>> {
-        let output = self.cmux_query(&["list-workspaces"])?;
+        let output = match self.cmux_query(&["list-workspaces"]) {
+            Ok(out) => out,
+            Err(e) if format!("{:#}", e).contains("TabManager") => {
+                info!("cmux: TabManager not available, opening a window to bootstrap");
+                self.cmux_cmd(&["new-window"])?;
+                self.cmux_query(&["list-workspaces"])?
+            }
+            Err(e) => return Err(e),
+        };
         let mut workspaces = Vec::new();
         for line in output.lines() {
             let trimmed = line.trim();
