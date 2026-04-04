@@ -50,6 +50,9 @@ pub struct GroupState {
     pub dev_env: Option<crate::dev_env::DevEnvState>,
 }
 
+/// Name of the generated VS Code workspace file
+const VSCODE_WORKSPACE_SUFFIX: &str = ".code-workspace";
+
 impl GroupState {
     /// Load state from a workspace directory
     pub fn load(workspace_dir: &Path) -> Result<Self> {
@@ -227,6 +230,9 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
     };
     state.save(&ws_dir)?;
 
+    // Generate VS Code workspace file
+    generate_vscode_workspace(&state, &ws_dir)?;
+
     // Attach dev environment if configured
     crate::command::dev_env::auto_attach(group_config, &mut state, &ws_dir)?;
 
@@ -274,6 +280,38 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
         repos_created: repo_states.len(),
         state,
     })
+}
+
+/// Generate a VS Code `.code-workspace` file from group state.
+///
+/// The file lists each repo symlink as a workspace folder so VS Code (and
+/// compatible editors) can open the entire group as a multi-root workspace.
+fn generate_vscode_workspace(state: &GroupState, workspace_dir: &Path) -> Result<()> {
+    let folders: Vec<serde_json::Value> = state
+        .repos
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "path": r.symlink_name,
+                "name": r.symlink_name,
+            })
+        })
+        .collect();
+
+    let workspace = serde_json::json!({
+        "folders": folders,
+        "settings": {},
+    });
+
+    let filename = format!("{}{}", state.group_name, VSCODE_WORKSPACE_SUFFIX);
+    let path = workspace_dir.join(&filename);
+    let content = serde_json::to_string_pretty(&workspace)
+        .context("Failed to serialize VS Code workspace file")?;
+    fs::write(&path, content)
+        .with_context(|| format!("Failed to write VS Code workspace file: {}", path.display()))?;
+
+    debug!(path = %path.display(), "group:vscode_workspace:generated");
+    Ok(())
 }
 
 /// Create a worktree in a specific repository
@@ -986,6 +1024,59 @@ mod tests {
         let dir = groups_dir().unwrap();
         let home = home::home_dir().unwrap();
         assert_eq!(dir, home.join(".local/share/workmux/groups"));
+    }
+
+    #[test]
+    fn test_generate_vscode_workspace() {
+        let tmp = TempDir::new().unwrap();
+
+        let state = GroupState {
+            group_name: "choam".to_string(),
+            branch: "feat/test".to_string(),
+            repos: vec![
+                GroupRepoState {
+                    repo_path: PathBuf::from("/home/user/repo1"),
+                    worktree_path: PathBuf::from("/home/user/repo1__worktrees/feat-test"),
+                    branch: "feat/test".to_string(),
+                    symlink_name: "repo1".to_string(),
+                },
+                GroupRepoState {
+                    repo_path: PathBuf::from("/home/user/repo2"),
+                    worktree_path: PathBuf::from("/home/user/repo2__worktrees/feat-test"),
+                    branch: "feat/test".to_string(),
+                    symlink_name: "repo2".to_string(),
+                },
+            ],
+            created_at: 1234567890,
+            dev_env: None,
+        };
+
+        generate_vscode_workspace(&state, tmp.path()).unwrap();
+
+        let ws_path = tmp.path().join("choam.code-workspace");
+        assert!(ws_path.exists());
+
+        let content = fs::read_to_string(&ws_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let folders = parsed["folders"].as_array().unwrap();
+        if folders.len() != 2 {
+            panic!("expected 2 folders, got {}", folders.len());
+        }
+        if folders[0]["path"] != "repo1" {
+            panic!("expected first folder path 'repo1', got {}", folders[0]["path"]);
+        }
+        if folders[0]["name"] != "repo1" {
+            panic!("expected first folder name 'repo1', got {}", folders[0]["name"]);
+        }
+        if folders[1]["path"] != "repo2" {
+            panic!("expected second folder path 'repo2', got {}", folders[1]["path"]);
+        }
+
+        // settings key exists
+        if parsed.get("settings").is_none() {
+            panic!("expected 'settings' key in workspace file");
+        }
     }
 
     #[test]
