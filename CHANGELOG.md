@@ -22,7 +22,7 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## v0.1.173-choam.5 (2026-04-05)
+## v0.1.173-choam.6 (2026-04-05)
 
 - Add group shipping strategies (`local`, `pr`, `mq`) with per-repo overrides
   and group-level context metadata
