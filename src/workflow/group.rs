@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-use crate::config::{Config, MuxMode};
+use crate::config::{Config, MuxMode, ShipStrategy};
 use crate::git;
 use crate::multiplexer::{MuxHandle, Multiplexer, create_backend, detect_backend};
 use crate::prompt::Prompt;
@@ -32,6 +32,9 @@ pub struct GroupRepoState {
     pub branch: String,
     /// Symlink name in workspace (repo directory name)
     pub symlink_name: String,
+    /// Ship strategy for this repo (resolved: group default with per-repo override applied)
+    #[serde(default)]
+    pub ship: ShipStrategy,
 }
 
 /// Persisted state for a group workspace
@@ -41,6 +44,12 @@ pub struct GroupState {
     pub group_name: String,
     /// Branch used across all repos
     pub branch: String,
+    /// Default ship strategy for this group
+    #[serde(default)]
+    pub ship: ShipStrategy,
+    /// Freeform context for the agent (injected into system prompt)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// State for each repository
     pub repos: Vec<GroupRepoState>,
     /// Unix timestamp when created
@@ -194,11 +203,15 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
                     continue;
                 }
 
+                // Resolve ship strategy: per-repo override > group default
+                let ship = repo_config.ship.unwrap_or(group_config.ship);
+
                 repo_states.push(GroupRepoState {
                     repo_path: repo_path.clone(),
                     worktree_path,
                     branch: branch.to_string(),
                     symlink_name: repo_name,
+                    ship,
                 });
             }
             Err(e) => {
@@ -221,6 +234,8 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
     let mut state = GroupState {
         group_name: group_name.to_string(),
         branch: branch.to_string(),
+        ship: group_config.ship,
+        context: group_config.context.clone(),
         repos: repo_states.clone(),
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -771,9 +786,14 @@ pub fn merge(args: GroupMergeArgs) -> Result<()> {
         }
     }
 
-    // Clean up unless --keep
-    if !keep {
+    // Clean up only if ALL repos succeeded and --keep wasn't passed
+    if errors.is_empty() && !keep {
         remove_internal(group_name, branch, true)?;
+    } else if !errors.is_empty() && !keep {
+        eprintln!(
+            "\nWorkspace preserved (some repos failed). Retry after fixing, or use:\n  workmux group remove {} {}",
+            group_name, branch
+        );
     }
 
     if !errors.is_empty() {
@@ -795,6 +815,7 @@ pub fn merge(args: GroupMergeArgs) -> Result<()> {
 
 fn merge_repo_worktree(repo_state: &GroupRepoState, into: Option<&str>) -> Result<()> {
     use crate::cmd::Cmd;
+    use crate::config::ShipStrategy;
 
     let worktree_path = &repo_state.worktree_path;
     if !worktree_path.exists() {
@@ -814,38 +835,131 @@ fn merge_repo_worktree(repo_state: &GroupRepoState, into: Option<&str>) -> Resul
         bail!("Has uncommitted changes");
     }
 
-    // Switch to main worktree to merge
-    let main_worktree = git::get_main_worktree_root_in(&repo_state.repo_path)?;
+    match repo_state.ship {
+        ShipStrategy::Pr | ShipStrategy::Mq => {
+            // Push the branch to origin
+            git::push_branch(worktree_path, "origin", &repo_state.branch, true)?;
 
-    // Checkout target branch
-    Cmd::new("git")
-        .workdir(&main_worktree)
-        .args(&["checkout", &target])
-        .run()
-        .context("Failed to checkout target branch")?;
+            // Create PR via gh cli. Use --json to get structured output
+            // so we can reliably extract the PR number.
+            let pr_result = Cmd::new("gh")
+                .workdir(worktree_path)
+                .args(&[
+                    "pr", "create",
+                    "--base", &target,
+                    "--head", &repo_state.branch,
+                    "--fill",
+                ])
+                .run_and_capture_stdout();
 
-    // Merge
-    Cmd::new("git")
-        .workdir(&main_worktree)
-        .args(&["merge", &repo_state.branch, "--no-edit"])
-        .run()
-        .context("Failed to merge branch")?;
+            let pr_url = match pr_result {
+                Ok(output) => output.trim().to_string(),
+                Err(e) => {
+                    let err_msg = format!("{}", e);
+                    // If a PR already exists for this branch, don't delete
+                    // the remote branch -- that would orphan the existing PR.
+                    let pr_already_exists = err_msg.contains("already exists")
+                        || err_msg.contains("A pull request already exists");
 
-    // Remove worktree
-    Cmd::new("git")
-        .workdir(&repo_state.repo_path)
-        .args(&["worktree", "remove", worktree_path.to_str().unwrap()])
-        .run()
-        .context("Failed to remove worktree")?;
+                    if !pr_already_exists {
+                        // Push succeeded but PR creation failed for another reason.
+                        // Clean up the remote branch to avoid orphans.
+                        warn!(
+                            branch = %repo_state.branch,
+                            error = %e,
+                            "PR creation failed, cleaning up remote branch"
+                        );
+                        let _ = Cmd::new("git")
+                            .workdir(worktree_path)
+                            .args(&["push", "origin", "--delete", &repo_state.branch])
+                            .run();
+                    } else {
+                        info!(
+                            branch = %repo_state.branch,
+                            "PR already exists for branch, keeping remote branch"
+                        );
+                    }
+                    return Err(e.context("Failed to create PR via gh cli"));
+                }
+            };
 
-    // Delete branch
-    Cmd::new("git")
-        .workdir(&repo_state.repo_path)
-        .args(&["branch", "-d", &repo_state.branch])
-        .run()
-        .context("Failed to delete branch")?;
+            println!("  PR: {}", pr_url);
+
+            // For MQ: enqueue the PR using gh pr view to get the number reliably
+            if repo_state.ship == ShipStrategy::Mq {
+                let pr_number = get_pr_number_for_branch(worktree_path, &repo_state.branch)
+                    .context("Failed to resolve PR number for merge queue")?;
+
+                Cmd::new("gh")
+                    .workdir(worktree_path)
+                    .args(&["pr", "merge", &pr_number.to_string(), "--merge-queue"])
+                    .run()
+                    .context("Failed to enqueue PR in merge queue")?;
+
+                println!("  Enqueued in merge queue");
+            }
+
+            // Clean up local worktree (but NOT the remote branch -- PR needs it)
+            Cmd::new("git")
+                .workdir(&repo_state.repo_path)
+                .args(&["worktree", "remove", worktree_path.to_str().unwrap()])
+                .run()
+                .context("Failed to remove worktree")?;
+
+            // Delete local branch (remote branch stays for the PR)
+            Cmd::new("git")
+                .workdir(&repo_state.repo_path)
+                .args(&["branch", "-D", &repo_state.branch])
+                .run()
+                .context("Failed to delete local branch")?;
+        }
+        ShipStrategy::Local => {
+            // Original local merge behavior
+            let main_worktree = git::get_main_worktree_root_in(&repo_state.repo_path)?;
+
+            Cmd::new("git")
+                .workdir(&main_worktree)
+                .args(&["checkout", &target])
+                .run()
+                .context("Failed to checkout target branch")?;
+
+            Cmd::new("git")
+                .workdir(&main_worktree)
+                .args(&["merge", &repo_state.branch, "--no-edit"])
+                .run()
+                .context("Failed to merge branch")?;
+
+            Cmd::new("git")
+                .workdir(&repo_state.repo_path)
+                .args(&["worktree", "remove", worktree_path.to_str().unwrap()])
+                .run()
+                .context("Failed to remove worktree")?;
+
+            Cmd::new("git")
+                .workdir(&repo_state.repo_path)
+                .args(&["branch", "-d", &repo_state.branch])
+                .run()
+                .context("Failed to delete branch")?;
+        }
+    }
 
     Ok(())
+}
+
+/// Get the PR number for a branch using `gh pr view` (more reliable than URL parsing).
+fn get_pr_number_for_branch(worktree_path: &std::path::Path, branch: &str) -> Result<u32> {
+    use crate::cmd::Cmd;
+
+    let output = Cmd::new("gh")
+        .workdir(worktree_path)
+        .args(&["pr", "view", branch, "--json", "number", "--jq", ".number"])
+        .run_and_capture_stdout()
+        .context("Failed to get PR number")?;
+
+    output
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("Could not parse PR number from: '{}'", output.trim()))
 }
 
 /// Remove a group workspace
@@ -1006,11 +1120,14 @@ mod tests {
         let state = GroupState {
             group_name: "test-group".to_string(),
             branch: "feat/test".to_string(),
+            ship: ShipStrategy::default(),
+            context: None,
             repos: vec![GroupRepoState {
                 repo_path: PathBuf::from("/home/user/repo1"),
                 worktree_path: PathBuf::from("/home/user/repo1__worktrees/feat-test"),
                 branch: "feat/test".to_string(),
                 symlink_name: "repo1".to_string(),
+                ship: ShipStrategy::default(),
             }],
             created_at: 1234567890,
             dev_env: None,
@@ -1040,18 +1157,22 @@ mod tests {
         let state = GroupState {
             group_name: "choam".to_string(),
             branch: "feat/test".to_string(),
+            ship: ShipStrategy::default(),
+            context: None,
             repos: vec![
                 GroupRepoState {
                     repo_path: PathBuf::from("/home/user/repo1"),
                     worktree_path: PathBuf::from("/home/user/repo1__worktrees/feat-test"),
                     branch: "feat/test".to_string(),
                     symlink_name: "repo1".to_string(),
+                    ship: ShipStrategy::default(),
                 },
                 GroupRepoState {
                     repo_path: PathBuf::from("/home/user/repo2"),
                     worktree_path: PathBuf::from("/home/user/repo2__worktrees/feat-test"),
                     branch: "feat/test".to_string(),
                     symlink_name: "repo2".to_string(),
+                    ship: ShipStrategy::default(),
                 },
             ],
             created_at: 1234567890,
@@ -1095,5 +1216,114 @@ mod tests {
         // We can't assert it's empty because there might be real groups
         // Just verify it doesn't error
         let _ = groups;
+    }
+
+    // ── Ship strategy + context tests ──────────────────────────────────
+
+    #[test]
+    fn test_group_state_roundtrip_with_ship_and_context() {
+        let tmp = TempDir::new().unwrap();
+
+        let state = GroupState {
+            group_name: "choam".to_string(),
+            branch: "feat/ship".to_string(),
+            ship: ShipStrategy::Pr,
+            context: Some("Release cmux first, then deck.".to_string()),
+            repos: vec![
+                GroupRepoState {
+                    repo_path: PathBuf::from("/home/user/repo1"),
+                    worktree_path: PathBuf::from("/home/user/repo1__worktrees/feat-ship"),
+                    branch: "feat/ship".to_string(),
+                    symlink_name: "repo1".to_string(),
+                    ship: ShipStrategy::Pr,
+                },
+                GroupRepoState {
+                    repo_path: PathBuf::from("/home/user/dotfiles"),
+                    worktree_path: PathBuf::from("/home/user/dotfiles__worktrees/feat-ship"),
+                    branch: "feat/ship".to_string(),
+                    symlink_name: "dotfiles".to_string(),
+                    ship: ShipStrategy::Local,
+                },
+            ],
+            created_at: 9999999999,
+            dev_env: None,
+        };
+
+        state.save(tmp.path()).unwrap();
+        let loaded = GroupState::load(tmp.path()).unwrap();
+
+        assert_eq!(loaded.ship, ShipStrategy::Pr);
+        assert_eq!(loaded.context.as_deref(), Some("Release cmux first, then deck."));
+        assert_eq!(loaded.repos[0].ship, ShipStrategy::Pr);
+        assert_eq!(loaded.repos[1].ship, ShipStrategy::Local);
+    }
+
+    #[test]
+    fn test_group_state_backward_compat_no_ship_or_context() {
+        // Simulate loading an old group state file that doesn't have ship/context
+        let tmp = TempDir::new().unwrap();
+        let yaml = r#"
+group_name: legacy
+branch: old-branch
+repos:
+  - repo_path: /home/user/repo1
+    worktree_path: /home/user/repo1__worktrees/old-branch
+    branch: old-branch
+    symlink_name: repo1
+created_at: 1234567890
+"#;
+        fs::write(tmp.path().join(STATE_FILE), yaml).unwrap();
+        let loaded = GroupState::load(tmp.path()).unwrap();
+
+        assert_eq!(loaded.ship, ShipStrategy::Local); // default
+        assert!(loaded.context.is_none());
+        assert_eq!(loaded.repos[0].ship, ShipStrategy::Local); // default
+        assert_eq!(loaded.repos[0].symlink_name, "repo1");
+    }
+
+    #[test]
+    fn test_group_state_mq_strategy_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+
+        let state = GroupState {
+            group_name: "mc-hcp".to_string(),
+            branch: "feat/thing".to_string(),
+            ship: ShipStrategy::Mq,
+            context: None,
+            repos: vec![GroupRepoState {
+                repo_path: PathBuf::from("/home/user/hcp"),
+                worktree_path: PathBuf::from("/home/user/hcp__worktrees/feat-thing"),
+                branch: "feat/thing".to_string(),
+                symlink_name: "hcp".to_string(),
+                ship: ShipStrategy::Mq,
+            }],
+            created_at: 1000000000,
+            dev_env: None,
+        };
+
+        state.save(tmp.path()).unwrap();
+        let loaded = GroupState::load(tmp.path()).unwrap();
+        assert_eq!(loaded.ship, ShipStrategy::Mq);
+        assert_eq!(loaded.repos[0].ship, ShipStrategy::Mq);
+    }
+
+    #[test]
+    fn test_group_state_context_preserves_multiline() {
+        let tmp = TempDir::new().unwrap();
+
+        let context = "Line one.\nLine two.\n\nLine four with gap.".to_string();
+        let state = GroupState {
+            group_name: "test".to_string(),
+            branch: "b".to_string(),
+            ship: ShipStrategy::default(),
+            context: Some(context.clone()),
+            repos: vec![],
+            created_at: 0,
+            dev_env: None,
+        };
+
+        state.save(tmp.path()).unwrap();
+        let loaded = GroupState::load(tmp.path()).unwrap();
+        assert_eq!(loaded.context.as_deref(), Some(context.as_str()));
     }
 }

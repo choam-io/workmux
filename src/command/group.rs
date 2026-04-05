@@ -234,11 +234,21 @@ pub fn run_merge(
     let (group_name, branch) = resolve_group_args(group_name, branch)?;
     // Confirm unless piped
     if std::io::stdin().is_terminal() {
+        // Load group state to show ship strategies
+        let ws_dir = group::workspace_dir(&group_name, &branch)?;
+        let state = group::GroupState::load(&ws_dir)?;
+
+        let strategy_summary: Vec<String> = state
+            .repos
+            .iter()
+            .map(|r| format!("  {} ({})", r.symlink_name, r.ship))
+            .collect();
+
         eprintln!(
-            "This will merge branch '{}' into {} across all repos in group '{}'.",
+            "Ship branch '{}' across group '{}':\n{}",
             branch,
-            into.unwrap_or("their default branches"),
-            group_name
+            group_name,
+            strategy_summary.join("\n")
         );
         eprint!("Continue? [y/N] ");
         let mut input = String::new();

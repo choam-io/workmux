@@ -595,6 +595,16 @@ enum Commands {
     /// Update workmux to the latest version
     Update,
 
+    /// Install pre-commit hooks on ghq repos to prevent direct commits to main
+    Guard {
+        /// Remove guard hooks instead of installing
+        #[arg(long, conflicts_with = "status")]
+        remove: bool,
+        /// Show guard status across all repos
+        #[arg(long, conflicts_with = "remove")]
+        status: bool,
+    },
+
     /// Cross-repo worktree groups
     Group {
         #[command(subcommand)]
@@ -1055,6 +1065,15 @@ pub fn run() -> Result<()> {
         Commands::Docs => command::docs::run(),
         Commands::Changelog => command::changelog::run(),
         Commands::Update => command::update::run(),
+        Commands::Guard { remove, status } => {
+            if status {
+                command::guard::run_status()
+            } else if remove {
+                command::guard::run_remove()
+            } else {
+                command::guard::run_install()
+            }
+        }
         Commands::Group { command } => match command {
             GroupCommands::Add {
                 group_name,

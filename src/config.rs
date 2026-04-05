@@ -220,11 +220,37 @@ pub struct WindowConfig {
     pub panes: Option<Vec<PaneConfig>>,
 }
 
+/// How a group (or individual repo) ships changes.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ShipStrategy {
+    /// Merge locally into the base branch (current default behavior)
+    #[default]
+    Local,
+    /// Push and open a pull request via `gh pr create`
+    Pr,
+    /// Push, open a PR, and enqueue it via merge queue
+    Mq,
+}
+
+impl std::fmt::Display for ShipStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShipStrategy::Local => write!(f, "local"),
+            ShipStrategy::Pr => write!(f, "pr"),
+            ShipStrategy::Mq => write!(f, "mq"),
+        }
+    }
+}
+
 /// Configuration for a single repository in a group
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GroupRepoConfig {
     /// Path to the repository (supports ~ expansion)
     pub path: String,
+    /// Per-repo ship strategy override (inherits group default if not set)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship: Option<ShipStrategy>,
 }
 
 /// Configuration for a group of repositories
@@ -232,6 +258,12 @@ pub struct GroupRepoConfig {
 pub struct GroupConfig {
     /// List of repositories in this group
     pub repos: Vec<GroupRepoConfig>,
+    /// Default ship strategy for all repos in this group
+    #[serde(default)]
+    pub ship: ShipStrategy,
+    /// Freeform context injected into the agent's system prompt when working in this group
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// Dev environment configuration (codespace, etc.)
     #[serde(default)]
     pub dev_env: Option<crate::dev_env::DevEnvConfig>,
@@ -4352,5 +4384,99 @@ panes:
         let merged = global.merge(project);
         let layouts = merged.layouts.unwrap();
         assert!(layouts.contains_key("a"));
+    }
+
+    // ── ShipStrategy tests ─────────────────────────────────────────────
+
+    use super::{GroupConfig, GroupRepoConfig, ShipStrategy};
+
+    #[test]
+    fn ship_strategy_deserializes_all_variants() {
+        let cases = [("local", ShipStrategy::Local), ("pr", ShipStrategy::Pr), ("mq", ShipStrategy::Mq)];
+        for (input, expected) in cases {
+            let yaml = format!("\"{}\"", input);
+            let parsed: ShipStrategy = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(parsed, expected, "failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn ship_strategy_defaults_to_local() {
+        assert_eq!(ShipStrategy::default(), ShipStrategy::Local);
+    }
+
+    #[test]
+    fn ship_strategy_display() {
+        assert_eq!(ShipStrategy::Local.to_string(), "local");
+        assert_eq!(ShipStrategy::Pr.to_string(), "pr");
+        assert_eq!(ShipStrategy::Mq.to_string(), "mq");
+    }
+
+    #[test]
+    fn ship_strategy_rejects_unknown() {
+        let result: Result<ShipStrategy, _> = serde_yaml::from_str("\"yolo\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn group_config_with_ship_and_context() {
+        let yaml = r#"
+ship: pr
+context: |
+  Release cmux first, then update deck pins.
+repos:
+  - path: ~/ghq/github.com/choam-io/cmux
+  - path: ~/ghq/github.com/nodeselector/ns-dotfiles
+    ship: local
+"#;
+        let config: GroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.ship, ShipStrategy::Pr);
+        assert!(config.context.as_ref().unwrap().contains("Release cmux"));
+        assert_eq!(config.repos.len(), 2);
+        assert_eq!(config.repos[0].ship, None); // inherits group default
+        assert_eq!(config.repos[1].ship, Some(ShipStrategy::Local));
+    }
+
+    #[test]
+    fn group_config_defaults_ship_to_local_when_omitted() {
+        let yaml = r#"
+repos:
+  - path: ~/ghq/github.com/choam-io/cmux
+"#;
+        let config: GroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.ship, ShipStrategy::Local);
+        assert!(config.context.is_none());
+    }
+
+    #[test]
+    fn group_config_ignores_unknown_fields_like_merge_order() {
+        // Ensures backward compat with old configs that have merge_order
+        let yaml = r#"
+ship: pr
+merge_order:
+  - cmux
+  - workmux
+repos:
+  - path: ~/ghq/github.com/choam-io/cmux
+"#;
+        let config: GroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.ship, ShipStrategy::Pr);
+        assert_eq!(config.repos.len(), 1);
+    }
+
+    #[test]
+    fn group_repo_config_serializes_ship_only_when_set() {
+        let with_ship = GroupRepoConfig {
+            path: "~/repo".to_string(),
+            ship: Some(ShipStrategy::Mq),
+        };
+        let without_ship = GroupRepoConfig {
+            path: "~/repo".to_string(),
+            ship: None,
+        };
+        let yaml_with = serde_yaml::to_string(&with_ship).unwrap();
+        let yaml_without = serde_yaml::to_string(&without_ship).unwrap();
+        assert!(yaml_with.contains("ship:"));
+        assert!(!yaml_without.contains("ship:"));
     }
 }
