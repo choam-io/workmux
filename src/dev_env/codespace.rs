@@ -73,11 +73,12 @@ pub fn detach(codespace_name: &str) -> Result<()> {
 }
 
 /// Find an existing codespace for a repository.
+/// Prefers a running (Available) codespace. Warns if multiple exist.
 fn find_existing(repo: &str) -> Result<Option<String>> {
     let output = Command::new("gh")
         .args([
             "codespace", "list", "--repo", repo,
-            "--json", "name,state", "--limit", "1",
+            "--json", "name,state", "--limit", "10",
         ])
         .output()
         .context("Failed to execute gh codespace list")?;
@@ -91,9 +92,37 @@ fn find_existing(repo: &str) -> Result<Option<String>> {
     let codespaces: Vec<serde_json::Value> =
         serde_json::from_str(&stdout).context("Failed to parse codespace list")?;
 
-    Ok(codespaces
-        .first()
-        .and_then(|cs| cs.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())))
+    if codespaces.is_empty() {
+        return Ok(None);
+    }
+
+    if codespaces.len() > 1 {
+        let names: Vec<&str> = codespaces
+            .iter()
+            .filter_map(|cs| cs.get("name").and_then(|n| n.as_str()))
+            .collect();
+        warn!(
+            repo = %repo,
+            count = codespaces.len(),
+            names = ?names,
+            "multiple codespaces found for repo, preferring running instance"
+        );
+        eprintln!(
+            "Warning: {} codespaces found for {}. Use --codespace <name> to target a specific one.",
+            codespaces.len(), repo,
+        );
+    }
+
+    // Prefer an Available (running) codespace over shutdown ones
+    let available = codespaces.iter().find(|cs| {
+        cs.get("state")
+            .and_then(|s| s.as_str())
+            .map(|s| s == "Available")
+            .unwrap_or(false)
+    });
+
+    let chosen = available.or(codespaces.first());
+    Ok(chosen.and_then(|cs| cs.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())))
 }
 
 /// Create a new codespace from config.
@@ -112,10 +141,28 @@ fn create(config: &DevEnvConfig) -> Result<String> {
 
     eprintln!("Creating codespace (this may take a minute)...");
 
+    // If no machine specified, resolve the default (cheapest available).
+    // gh codespace create prompts interactively when --machine is omitted,
+    // which fails in non-interactive contexts (background, agents, pipes).
+    let resolved_machine: Option<String> = if machine.is_some() {
+        machine.clone()
+    } else {
+        match resolve_default_machine(repo) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                // Hard error: without --machine, gh codespace create will prompt
+                // interactively and fail in non-interactive contexts.
+                return Err(e.context(
+                    "Could not auto-detect machine type. Set 'machine' in dev_env config."
+                ));
+            }
+        }
+    };
+
     let mut cmd = Command::new("gh");
     cmd.args(["codespace", "create", "--repo", repo]);
 
-    if let Some(m) = machine {
+    if let Some(m) = &resolved_machine {
         cmd.args(["--machine", m]);
     }
     if let Some(b) = branch {
@@ -257,6 +304,32 @@ fn setup_ssh(codespace_name: &str) -> Result<String> {
     }
 
     Ok(ssh_host)
+}
+
+/// Resolve the default (cheapest) machine type for a repository.
+///
+/// Queries the GitHub API for available machine types and picks the first one
+/// (they're returned in ascending order by resources). This avoids the
+/// interactive prompt that `gh codespace create` uses when `--machine` is
+/// omitted, which fails in non-interactive contexts.
+fn resolve_default_machine(repo: &str) -> Result<String> {
+    let output = Command::new("gh")
+        .args(["api", &format!("repos/{}/codespaces/machines", repo), "--jq", ".machines[0].name"])
+        .output()
+        .context("Failed to query available machines")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("Failed to list machines: {}", stderr.trim()));
+    }
+
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        return Err(anyhow!("No machines available for repo {}", repo));
+    }
+
+    info!(repo = %repo, machine = %name, "auto-selected cheapest machine type");
+    Ok(name)
 }
 
 /// Check if SSH to a codespace works.

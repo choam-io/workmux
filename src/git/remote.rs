@@ -127,6 +127,22 @@ pub fn ensure_fork_remote(fork_owner: &str) -> Result<String> {
     Ok(remote_name)
 }
 
+/// Push a branch to a remote. Optionally set upstream tracking.
+pub fn push_branch(worktree_path: &std::path::Path, remote: &str, branch: &str, set_upstream: bool) -> Result<()> {
+    let mut args = vec!["push"];
+    if set_upstream {
+        args.push("--set-upstream");
+    }
+    args.push(remote);
+    args.push(branch);
+    Cmd::new("git")
+        .workdir(worktree_path)
+        .args(&args)
+        .run()
+        .with_context(|| format!("Failed to push '{}' to '{}'", branch, remote))?;
+    Ok(())
+}
+
 /// Parse the repository owner from a git remote URL
 /// Supports both HTTPS and SSH formats for github.com and GitHub Enterprise domains
 fn parse_owner_from_git_url(url: &str) -> Option<&str> {
