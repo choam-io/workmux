@@ -100,32 +100,17 @@ fn read_stdin_lines() -> Result<Vec<String>> {
 fn check_preconditions() -> Result<()> {
     let is_git = git::is_git_repo()?;
     let mux = create_backend(detect_backend());
-    let is_mux_running = mux.is_running()?;
 
-    if is_git && is_mux_running {
-        return Ok(());
-    }
-
-    let mut errors = Vec::new();
-
-    if !is_mux_running {
-        errors.push(format!("{} is not running.", mux.name()));
-    }
     if !is_git {
-        errors.push("Current directory is not a git repository.".to_string());
+        return Err(anyhow!(
+            "Current directory is not a git repository.\n\nPlease run this command from within a git repository."
+        ));
     }
 
-    // Add blank line before suggestions
-    errors.push("".to_string());
+    // ensure_running will auto-launch backends that support it (e.g. cmux)
+    mux.ensure_running()?;
 
-    if !is_mux_running {
-        errors.push(format!("Please start a {} session first.", mux.name()));
-    }
-    if !is_git {
-        errors.push("Please run this command from within a git repository.".to_string());
-    }
-
-    Err(anyhow!(errors.join("\n")))
+    Ok(())
 }
 
 /// Resolve a named layout by replacing `config.panes` with the layout's panes.

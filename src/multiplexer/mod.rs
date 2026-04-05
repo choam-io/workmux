@@ -39,6 +39,19 @@ pub trait Multiplexer: Send + Sync {
     /// Check if the multiplexer server is running
     fn is_running(&self) -> Result<bool>;
 
+    /// Ensure the multiplexer is running, launching it if possible.
+    /// Default implementation just checks `is_running()` and returns an error if not.
+    /// Backends that can auto-launch (e.g. cmux) should override this.
+    fn ensure_running(&self) -> Result<()> {
+        if !self.is_running()? {
+            return Err(anyhow!(
+                "{} is not running. Please start it first.",
+                self.name()
+            ));
+        }
+        Ok(())
+    }
+
     /// Get the current pane ID from environment (TMUX_PANE or WEZTERM_PANE)
     fn current_pane_id(&self) -> Option<String>;
 

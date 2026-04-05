@@ -249,14 +249,20 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
     // Launch agent
     {
         let mux = create_backend(detect_backend());
-        if mux.is_running()? {
-            let repo_names: Vec<String> = repo_states.iter().map(|r| r.symlink_name.clone()).collect();
-            launch_group_agent(&ws_dir, group_name, branch, &repo_names, prompt, background, false, mux.as_ref())?;
-        } else if !background {
-            eprintln!(
-                "workmux: no multiplexer running, created workspace at {}",
-                ws_dir.display()
-            );
+        match mux.ensure_running() {
+            Ok(()) => {
+                let repo_names: Vec<String> = repo_states.iter().map(|r| r.symlink_name.clone()).collect();
+                launch_group_agent(&ws_dir, group_name, branch, &repo_names, prompt, background, false, mux.as_ref())?;
+            }
+            Err(e) => {
+                if !background {
+                    eprintln!(
+                        "workmux: {}, created workspace at {}",
+                        e,
+                        ws_dir.display()
+                    );
+                }
+            }
         }
     }
 
@@ -419,10 +425,11 @@ pub fn open(args: GroupOpenArgs) -> Result<GroupOpenResult> {
     }
 
     let mux = create_backend(detect_backend());
-    if !mux.is_running()? {
+    if let Err(e) = mux.ensure_running() {
         if !background {
             eprintln!(
-                "workmux: no multiplexer running, workspace at {}",
+                "workmux: {}, workspace at {}",
+                e,
                 ws_dir.display()
             );
         }

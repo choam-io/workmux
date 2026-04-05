@@ -82,18 +82,11 @@ impl WorkflowContext {
         })
     }
 
-    /// Ensure the terminal multiplexer is running, returning an error if not
+    /// Ensure the terminal multiplexer is running, launching it if the backend supports auto-start.
     ///
     /// Call this at the start of workflows that require a multiplexer.
     pub fn ensure_mux_running(&self) -> Result<()> {
-        if !self.mux.is_running()? {
-            return Err(anyhow!(
-                "{} is not running. Please start a {} session first.",
-                self.mux.name(),
-                self.mux.name()
-            ));
-        }
-        Ok(())
+        self.mux.ensure_running()
     }
 
     /// Ensure tmux is running (backward-compat alias for ensure_mux_running)

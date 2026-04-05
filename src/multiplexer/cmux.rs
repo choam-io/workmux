@@ -455,6 +455,31 @@ impl Multiplexer for CmuxBackend {
         Ok(self.cmux_cmd(&["ping"]).is_ok())
     }
 
+    fn ensure_running(&self) -> Result<()> {
+        if self.is_running()? {
+            return Ok(());
+        }
+
+        // cmux is a macOS app -- launch it and wait for the socket.
+        info!("cmux: not running, launching cmux.app");
+        std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg("cmux")
+            .spawn()
+            .context("failed to launch cmux.app")?;
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(300));
+            if self.is_running()? {
+                info!("cmux: launched and ready");
+                return Ok(());
+            }
+        }
+
+        Err(anyhow!("cmux did not start within 15 seconds -- is it installed?"))
+    }
+
     fn current_pane_id(&self) -> Option<String> {
         let uuid = std::env::var("CMUX_SURFACE_ID").ok()?;
         // Resolve UUID to surface:N ref so it matches get_all_live_pane_info() keys
