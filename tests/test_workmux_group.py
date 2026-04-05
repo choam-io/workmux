@@ -1,7 +1,7 @@
 """Tests for workmux group subcommand.
 
 Tests cross-repo worktree group functionality including:
-- Group add with headless mode
+- Group add with background mode
 - Group list
 - Group status
 - Group remove
@@ -19,8 +19,8 @@ import yaml
 class TestGroupAdd:
     """Tests for workmux group add command."""
 
-    def test_group_add_headless_creates_workspace(self, test_env):
-        """Group add in headless mode creates workspace with symlinks."""
+    def test_group_add_background_creates_workspace(self, test_env):
+        """Group add in background mode creates workspace with symlinks."""
         # Create two repos
         repo1 = test_env.create_repo("repo1")
         repo2 = test_env.create_repo("repo2")
@@ -43,8 +43,8 @@ class TestGroupAdd:
             )
         )
 
-        # Run group add in headless mode
-        result = test_env.run_workmux("group", "add", "test-group", "feat/test", "--headless")
+        # Run group add in background mode
+        result = test_env.run_workmux("group", "add", "test-group", "feat/test", "--background")
         assert result.returncode == 0
         assert "Created group workspace" in result.stdout
 
@@ -62,7 +62,6 @@ class TestGroupAdd:
         state = yaml.safe_load(state_file.read_text())
         assert state["group_name"] == "test-group"
         assert state["branch"] == "feat/test"
-        assert state["headless"] == True
         assert len(state["repos"]) == 2
 
     def test_group_add_creates_worktrees(self, test_env):
@@ -87,7 +86,7 @@ class TestGroupAdd:
             )
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/branch", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/branch", "--background")
 
         # Verify worktrees created
         wt1 = repo1.parent / "repo1__worktrees" / "feat-branch"
@@ -112,11 +111,11 @@ class TestGroupAdd:
         )
 
         # First add succeeds
-        result1 = test_env.run_workmux("group", "add", "test", "feat/dup", "--headless")
+        result1 = test_env.run_workmux("group", "add", "test", "feat/dup", "--background")
         assert result1.returncode == 0
 
         # Second add fails
-        result2 = test_env.run_workmux("group", "add", "test", "feat/dup", "--headless")
+        result2 = test_env.run_workmux("group", "add", "test", "feat/dup", "--background")
         assert result2.returncode != 0
         assert "already exists" in result2.stderr
 
@@ -126,7 +125,7 @@ class TestGroupAdd:
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(yaml.dump({"groups": {}}))
 
-        result = test_env.run_workmux("group", "add", "nonexistent", "feat/x", "--headless")
+        result = test_env.run_workmux("group", "add", "nonexistent", "feat/x", "--background")
         assert result.returncode != 0
         assert "not found in config" in result.stderr
 
@@ -149,7 +148,7 @@ class TestGroupList:
             yaml.dump({"groups": {"test": {"repos": [{"path": str(repo)}]}}})
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/list-test", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/list-test", "--background")
 
         result = test_env.run_workmux("group", "list")
         assert result.returncode == 0
@@ -165,7 +164,7 @@ class TestGroupList:
             yaml.dump({"groups": {"test": {"repos": [{"path": str(repo)}]}}})
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/json", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/json", "--background")
 
         result = test_env.run_workmux("group", "list", "--json")
         assert result.returncode == 0
@@ -200,13 +199,15 @@ class TestGroupStatus:
             )
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/status", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/status", "--background")
 
         result = test_env.run_workmux("group", "status", "test", "feat/status")
         assert result.returncode == 0
         assert "repo1" in result.stdout
         assert "repo2" in result.stdout
-        assert "Agent: stopped" in result.stdout
+        # Agent may show as "running" or "stopped" depending on whether
+        # the mux backend is available in the test environment
+        assert "Agent:" in result.stdout
 
     def test_group_status_json(self, test_env):
         """Group status with --json outputs JSON."""
@@ -217,7 +218,7 @@ class TestGroupStatus:
             yaml.dump({"groups": {"test": {"repos": [{"path": str(repo)}]}}})
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/status-json", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/status-json", "--background")
 
         result = test_env.run_workmux("group", "status", "test", "feat/status-json", "--json")
         assert result.returncode == 0
@@ -245,7 +246,7 @@ class TestGroupRemove:
             yaml.dump({"groups": {"test": {"repos": [{"path": str(repo)}]}}})
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/remove", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/remove", "--background")
 
         ws_dir = test_env.groups_dir / "test--feat-remove"
         wt_dir = repo.parent / "repo__worktrees" / "feat-remove"
@@ -267,7 +268,7 @@ class TestGroupRemove:
             yaml.dump({"groups": {"test": {"repos": [{"path": str(repo)}]}}})
         )
 
-        test_env.run_workmux("group", "add", "test", "feat/dirty", "--headless")
+        test_env.run_workmux("group", "add", "test", "feat/dirty", "--background")
 
         # Create uncommitted change
         wt_dir = repo.parent / "repo__worktrees" / "feat-dirty"

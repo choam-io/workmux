@@ -1063,7 +1063,9 @@ fn fork_repo_worktree(
                     Ok(mut child) => {
                         use std::io::Write;
                         if let Some(ref mut stdin) = child.stdin {
-                            let _ = stdin.write_all(&diff_output.stdout);
+                            if let Err(e) = stdin.write_all(&diff_output.stdout) {
+                                warn!(repo = repo_name, error = %e, "group:fork:staged pipe write failed");
+                            }
                         }
                         match child.wait_with_output() {
                             Ok(out) if !out.status.success() => {
@@ -1135,7 +1137,9 @@ fn fork_repo_worktree(
                     Ok(mut child) => {
                         use std::io::Write;
                         if let Some(ref mut stdin) = child.stdin {
-                            let _ = stdin.write_all(&diff_output.stdout);
+                            if let Err(e) = stdin.write_all(&diff_output.stdout) {
+                                warn!(repo = repo_name, error = %e, "group:fork:unstaged pipe write failed");
+                            }
                         }
                         match child.wait_with_output() {
                             Ok(out) if !out.status.success() => {
@@ -1183,11 +1187,26 @@ fn fork_repo_worktree(
                     let _ = fs::create_dir_all(parent);
                 }
 
-                if let Err(e) = fs::copy(&src, &dst) {
-                    warnings.push(format!(
-                        "{}: failed to copy untracked file '{}': {}",
-                        repo_name, file_path, e
-                    ));
+                // Preserve symlinks rather than following them
+                match fs::symlink_metadata(&src) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        if let Ok(target) = fs::read_link(&src) {
+                            if let Err(e) = std::os::unix::fs::symlink(&target, &dst) {
+                                warnings.push(format!(
+                                    "{}: failed to copy untracked symlink '{}': {}",
+                                    repo_name, file_path, e
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = fs::copy(&src, &dst) {
+                            warnings.push(format!(
+                                "{}: failed to copy untracked file '{}': {}",
+                                repo_name, file_path, e
+                            ));
+                        }
+                    }
                 }
             }
         }
