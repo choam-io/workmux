@@ -835,6 +835,32 @@ enum GroupCommands {
         #[arg(short, long)]
         keep: bool,
     },
+    /// Fork an existing group workspace into a new branch
+    ///
+    /// Creates new worktrees branching from the source worktree's HEAD
+    /// (not the default branch). Uncommitted changes are copied to the
+    /// new workspace; the source is left untouched.
+    Fork {
+        /// Group name (detected from cwd if omitted)
+        group_name: Option<String>,
+        /// Source branch to fork from (detected from cwd if omitted)
+        source_branch: Option<String>,
+        /// New branch name to create
+        #[arg(short = 'b', long = "branch")]
+        new_branch: String,
+        /// Prompt text to inject into the agent
+        #[arg(short = 'p', long = "prompt")]
+        prompt: Option<String>,
+        /// Read prompt from a file
+        #[arg(short = 'P', long = "prompt-file")]
+        prompt_file: Option<std::path::PathBuf>,
+        /// Open an editor to write the prompt
+        #[arg(short = 'e', long = "prompt-editor")]
+        prompt_editor: bool,
+        /// Don't focus the new window
+        #[arg(long)]
+        background: bool,
+    },
     /// Remove a group workspace (worktrees and branches)
     Remove {
         /// Group name (detected from cwd if omitted)
@@ -1129,6 +1155,23 @@ pub fn run() -> Result<()> {
                 branch,
                 force,
             } => command::group::run_remove(group_name, branch, force),
+            GroupCommands::Fork {
+                group_name,
+                source_branch,
+                new_branch,
+                prompt,
+                prompt_file,
+                prompt_editor,
+                background,
+            } => command::group::run_fork(
+                group_name,
+                source_branch,
+                &new_branch,
+                prompt.as_deref(),
+                prompt_file.as_deref(),
+                prompt_editor,
+                background,
+            ),
             GroupCommands::DevEnv(args) => command::dev_env::run(args),
         },
         Commands::DevEnvWatcher {

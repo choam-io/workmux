@@ -6,7 +6,7 @@ use tabled::{Table, Tabled, settings::{Padding, Style}};
 
 use crate::config::Config;
 use crate::util::format_compact_age;
-use crate::workflow::group::{self, GroupAddArgs, GroupMergeArgs, GroupState, STATE_FILE};
+use crate::workflow::group::{self, GroupAddArgs, GroupForkArgs, GroupMergeArgs, GroupState, STATE_FILE};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt};
 
 /// Detect group context by looking for `.workmux-group.yaml` in the current
@@ -339,5 +339,53 @@ pub fn run_remove(
     group::remove(&group_name, &branch, force)?;
 
     println!("✓ Group workspace removed");
+    Ok(())
+}
+
+/// Run `workmux group fork`
+pub fn run_fork(
+    group_name: Option<String>,
+    source_branch: Option<String>,
+    new_branch: &str,
+    prompt_inline: Option<&str>,
+    prompt_file: Option<&std::path::Path>,
+    prompt_editor: bool,
+    background: bool,
+) -> Result<()> {
+    let config = Config::load(None)?;
+    let (group_name, source_branch) = resolve_group_args(group_name, source_branch)?;
+
+    let prompt = load_prompt(&PromptLoadArgs {
+        prompt_editor,
+        prompt_inline,
+        prompt_file: prompt_file.map(|p| p.to_path_buf()).as_ref(),
+    })?;
+
+    let result = group::fork(
+        &config,
+        GroupForkArgs {
+            group_name: &group_name,
+            source_branch: &source_branch,
+            new_branch,
+            prompt: prompt.as_ref(),
+            background,
+        },
+    )?;
+
+    println!(
+        "✓ Forked group workspace: {}",
+        result.workspace_dir.display()
+    );
+    println!("  Source: {}", source_branch);
+    println!("  Branch: {}", new_branch);
+    println!("  Repositories: {}", result.repos_forked);
+
+    if !result.warnings.is_empty() {
+        eprintln!("\nWarnings:");
+        for w in &result.warnings {
+            eprintln!("  ⚠ {}", w);
+        }
+    }
+
     Ok(())
 }

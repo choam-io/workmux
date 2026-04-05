@@ -799,6 +799,430 @@ fn count_unmerged_commits(worktree_path: &Path) -> Result<usize> {
     Ok(output.trim().parse().unwrap_or(0))
 }
 
+/// Arguments for group fork
+pub struct GroupForkArgs<'a> {
+    pub group_name: &'a str,
+    pub source_branch: &'a str,
+    pub new_branch: &'a str,
+    pub prompt: Option<&'a Prompt>,
+    pub background: bool,
+}
+
+/// Result from group fork
+pub struct GroupForkResult {
+    pub workspace_dir: PathBuf,
+    pub repos_forked: usize,
+    pub state: GroupState,
+    /// Per-repo warnings (e.g. dirty state transfer failures)
+    pub warnings: Vec<String>,
+}
+
+/// Fork an existing group workspace into a new branch.
+///
+/// Each repo's new worktree branches from the source worktree's HEAD (not the
+/// default branch). Uncommitted changes (staged, unstaged, and untracked files)
+/// are copied to the new worktree. The source workspace is left untouched.
+pub fn fork(config: &Config, args: GroupForkArgs) -> Result<GroupForkResult> {
+    let GroupForkArgs {
+        group_name,
+        source_branch,
+        new_branch,
+        prompt,
+        background,
+    } = args;
+
+    info!(
+        group = group_name,
+        source = source_branch,
+        target = new_branch,
+        "group:fork:start"
+    );
+
+    // Load source group state
+    let source_ws_dir = workspace_dir(group_name, source_branch)?;
+    if !source_ws_dir.exists() {
+        bail!(
+            "Source group workspace not found: {}--{}\n\
+             Use 'workmux group list' to see active workspaces.",
+            group_name,
+            slug::slugify(source_branch)
+        );
+    }
+    let source_state = GroupState::load(&source_ws_dir)?;
+
+    // Create new workspace directory
+    let new_ws_dir = workspace_dir(group_name, new_branch)?;
+    if new_ws_dir.exists() {
+        bail!(
+            "Target group workspace already exists: {}\n\
+             Use 'workmux group remove {} {}' to clean up first.",
+            new_ws_dir.display(),
+            group_name,
+            new_branch
+        );
+    }
+    fs::create_dir_all(&new_ws_dir)
+        .with_context(|| format!("Failed to create workspace directory: {}", new_ws_dir.display()))?;
+
+    let mut repo_states = Vec::new();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for source_repo in &source_state.repos {
+        let repo_name = &source_repo.symlink_name;
+        debug!(repo = repo_name, "group:fork:forking repo");
+
+        match fork_repo_worktree(source_repo, new_branch) {
+            Ok((new_repo_state, repo_warnings)) => {
+                // Create symlink in new workspace
+                let symlink_path = new_ws_dir.join(repo_name);
+                if let Err(e) = std::os::unix::fs::symlink(&new_repo_state.worktree_path, &symlink_path) {
+                    warn!(repo = repo_name, error = %e, "group:fork:symlink failed");
+                    errors.push(format!("{}: symlink failed: {}", repo_name, e));
+                    continue;
+                }
+
+                warnings.extend(repo_warnings);
+                repo_states.push(new_repo_state);
+            }
+            Err(e) => {
+                warn!(repo = repo_name, error = %e, "group:fork:failed");
+                errors.push(format!("{}: {}", repo_name, e));
+            }
+        }
+    }
+
+    if repo_states.is_empty() {
+        let _ = fs::remove_dir_all(&new_ws_dir);
+        bail!(
+            "Failed to fork any repositories:\n{}",
+            errors.join("\n")
+        );
+    }
+
+    // Create state
+    let mut state = GroupState {
+        group_name: group_name.to_string(),
+        branch: new_branch.to_string(),
+        ship: source_state.ship,
+        context: source_state.context.clone(),
+        repos: repo_states.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        dev_env: None,
+    };
+    state.save(&new_ws_dir)?;
+
+    // Generate VS Code workspace file
+    generate_vscode_workspace(&state, &new_ws_dir)?;
+
+    // Attach dev environment if source had one
+    if source_state.dev_env.is_some() {
+        if let Some(group_config) = config
+            .groups
+            .as_ref()
+            .and_then(|g| g.get(group_name))
+        {
+            crate::command::dev_env::auto_attach(group_config, &mut state, &new_ws_dir)?;
+        }
+    }
+
+    // Write prompt file if provided
+    if let Some(p) = prompt {
+        let prompt_path = new_ws_dir.join(".workmux").join("PROMPT.md");
+        if let Some(parent) = prompt_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = p.read_content()?;
+        fs::write(&prompt_path, &content)?;
+    }
+
+    // Launch agent
+    {
+        let mux = create_backend(detect_backend());
+        match mux.ensure_running() {
+            Ok(()) => {
+                let repo_names: Vec<String> = repo_states.iter().map(|r| r.symlink_name.clone()).collect();
+                launch_group_agent(
+                    &new_ws_dir, group_name, new_branch, &repo_names,
+                    prompt, background, false, mux.as_ref(),
+                )?;
+            }
+            Err(e) => {
+                if !background {
+                    eprintln!(
+                        "workmux: {}, created workspace at {}",
+                        e,
+                        new_ws_dir.display()
+                    );
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        eprintln!(
+            "Warning: some repositories failed:\n{}",
+            errors.join("\n")
+        );
+    }
+
+    info!(
+        group = group_name,
+        source = source_branch,
+        target = new_branch,
+        repos = repo_states.len(),
+        "group:fork:complete"
+    );
+
+    Ok(GroupForkResult {
+        workspace_dir: new_ws_dir,
+        repos_forked: repo_states.len(),
+        state,
+        warnings,
+    })
+}
+
+/// Fork a single repo's worktree: create new branch from source HEAD,
+/// then copy dirty state (staged, unstaged, untracked).
+fn fork_repo_worktree(
+    source_repo: &GroupRepoState,
+    new_branch: &str,
+) -> Result<(GroupRepoState, Vec<String>)> {
+    use crate::cmd::Cmd;
+
+    let source_wt = &source_repo.worktree_path;
+    if !source_wt.exists() {
+        bail!("Source worktree does not exist: {}", source_wt.display());
+    }
+
+    let repo_path = &source_repo.repo_path;
+    let repo_name = &source_repo.symlink_name;
+
+    // Get source HEAD commit
+    let source_head = Cmd::new("git")
+        .workdir(source_wt)
+        .args(&["rev-parse", "HEAD"])
+        .run_and_capture_stdout()
+        .context("Failed to get source HEAD")?;
+
+    // Compute new worktree path
+    let worktrees_dir = repo_path
+        .parent()
+        .ok_or_else(|| anyhow!("Could not determine parent directory"))?
+        .join(format!(
+            "{}__worktrees",
+            repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("repo")
+        ));
+    let new_wt_path = worktrees_dir.join(slug::slugify(new_branch));
+
+    // Check if branch already exists
+    if git::branch_exists_in(new_branch, Some(repo_path))? {
+        bail!("Branch '{}' already exists in {}", new_branch, repo_name);
+    }
+
+    // Create new worktree from source HEAD
+    // We pass source_head as base_branch so `git worktree add -b <new> <path> <source_head>`
+    let source_head_ref = source_head.as_str();
+    git::create_worktree_in(
+        repo_path,
+        &new_wt_path,
+        new_branch,
+        true, // create_branch
+        Some(source_head_ref),
+    )?;
+
+    // Propagate workmux-base: new branch should share the source branch's base
+    if let Ok(base) = git::get_branch_base_in(&source_repo.branch, Some(source_wt)) {
+        let _ = git::set_branch_base_in(new_branch, &base, Some(&new_wt_path));
+    }
+
+    // Transfer dirty state
+    let mut warnings = Vec::new();
+
+    // 1. Staged changes
+    if git::has_staged_changes(source_wt).unwrap_or(false) {
+        let result = std::process::Command::new("git")
+            .current_dir(source_wt)
+            .args(["diff", "--cached", "--binary"])
+            .output();
+
+        match result {
+            Ok(diff_output) if !diff_output.stdout.is_empty() => {
+                let apply = std::process::Command::new("git")
+                    .current_dir(&new_wt_path)
+                    .args(["apply", "--cached"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+
+                match apply {
+                    Ok(mut child) => {
+                        use std::io::Write;
+                        if let Some(ref mut stdin) = child.stdin {
+                            if let Err(e) = stdin.write_all(&diff_output.stdout) {
+                                warn!(repo = repo_name, error = %e, "group:fork:staged pipe write failed");
+                            }
+                        }
+                        match child.wait_with_output() {
+                            Ok(out) if !out.status.success() => {
+                                let msg = format!(
+                                    "{}: failed to apply staged changes: {}",
+                                    repo_name,
+                                    String::from_utf8_lossy(&out.stderr).trim()
+                                );
+                                warn!("{}", msg);
+                                warnings.push(msg);
+                            }
+                            Err(e) => {
+                                warnings.push(format!("{}: staged apply error: {}", repo_name, e));
+                            }
+                            Ok(_) => {
+                                // Materialize staged files in the working tree.
+                                // git apply --cached updates the index only; new files
+                                // won't exist on disk without this.
+                                let _ = std::process::Command::new("git")
+                                    .current_dir(&new_wt_path)
+                                    .args(["checkout-index", "-a", "-f"])
+                                    .output();
+
+                                // Remove working tree files that are staged as deleted.
+                                // checkout-index won't touch them (they're gone from the
+                                // index) but they still exist on disk from worktree creation.
+                                if let Ok(deleted) = std::process::Command::new("git")
+                                    .current_dir(&new_wt_path)
+                                    .args(["diff", "--cached", "--name-only", "--diff-filter=D"])
+                                    .output()
+                                {
+                                    let paths = String::from_utf8_lossy(&deleted.stdout);
+                                    for file_path in paths.lines() {
+                                        if !file_path.is_empty() {
+                                            let _ = fs::remove_file(new_wt_path.join(file_path));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warnings.push(format!("{}: failed to spawn git apply for staged: {}", repo_name, e));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 2. Unstaged changes (tracked files only)
+    if git::has_unstaged_changes(source_wt).unwrap_or(false) {
+        let result = std::process::Command::new("git")
+            .current_dir(source_wt)
+            .args(["diff", "--binary"])
+            .output();
+
+        match result {
+            Ok(diff_output) if !diff_output.stdout.is_empty() => {
+                let apply = std::process::Command::new("git")
+                    .current_dir(&new_wt_path)
+                    .args(["apply"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+
+                match apply {
+                    Ok(mut child) => {
+                        use std::io::Write;
+                        if let Some(ref mut stdin) = child.stdin {
+                            if let Err(e) = stdin.write_all(&diff_output.stdout) {
+                                warn!(repo = repo_name, error = %e, "group:fork:unstaged pipe write failed");
+                            }
+                        }
+                        match child.wait_with_output() {
+                            Ok(out) if !out.status.success() => {
+                                let msg = format!(
+                                    "{}: failed to apply unstaged changes: {}",
+                                    repo_name,
+                                    String::from_utf8_lossy(&out.stderr).trim()
+                                );
+                                warn!("{}", msg);
+                                warnings.push(msg);
+                            }
+                            Err(e) => {
+                                warnings.push(format!("{}: unstaged apply error: {}", repo_name, e));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        warnings.push(format!("{}: failed to spawn git apply for unstaged: {}", repo_name, e));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Untracked files
+    if git::has_untracked_files(source_wt).unwrap_or(false) {
+        let untracked = std::process::Command::new("git")
+            .current_dir(source_wt)
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .output();
+
+        if let Ok(output) = untracked {
+            let paths = String::from_utf8_lossy(&output.stdout);
+            for file_path in paths.split('\0') {
+                if file_path.is_empty() {
+                    continue;
+                }
+                let src = source_wt.join(file_path);
+                let dst = new_wt_path.join(file_path);
+
+                // Create parent directory if needed
+                if let Some(parent) = dst.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+
+                // Preserve symlinks rather than following them
+                match fs::symlink_metadata(&src) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        if let Ok(target) = fs::read_link(&src) {
+                            if let Err(e) = std::os::unix::fs::symlink(&target, &dst) {
+                                warnings.push(format!(
+                                    "{}: failed to copy untracked symlink '{}': {}",
+                                    repo_name, file_path, e
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = fs::copy(&src, &dst) {
+                            warnings.push(format!(
+                                "{}: failed to copy untracked file '{}': {}",
+                                repo_name, file_path, e
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let new_repo_state = GroupRepoState {
+        repo_path: repo_path.clone(),
+        worktree_path: new_wt_path,
+        branch: new_branch.to_string(),
+        symlink_name: repo_name.clone(),
+        ship: source_repo.ship,
+    };
+
+    Ok((new_repo_state, warnings))
+}
+
 /// Merge arguments
 pub struct GroupMergeArgs<'a> {
     pub group_name: &'a str,
