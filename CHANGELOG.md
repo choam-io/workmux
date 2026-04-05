@@ -22,6 +22,23 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.173-choam.5 (2026-04-05)
+
+- Add group shipping strategies (`local`, `pr`, `mq`) with per-repo overrides
+  and group-level context metadata
+- Add `workmux guard` to install pre-commit guardrails across `~/ghq` repos,
+  preventing accidental direct commits in main checkouts
+- Harden `workmux group merge` behavior:
+  - preserve group workspaces on partial failures
+  - clean up pushed remote branches when PR creation fails
+  - avoid deleting remote branches when a PR already exists
+  - resolve merge-queue PR numbers via `gh pr view --json number`
+- Improve codespace dev-env reliability:
+  - auto-detect a default machine when config omits `machine`
+  - prefer `Available` codespaces when multiple exist for a repo
+- Add integration coverage for real GitHub PR and Codespaces workflows,
+  including rollback, partial-failure preservation, and leak checks
+
 ## v0.1.173 (2026-04-02)
 
 - Add `--session` flag to `workmux sidebar` to scope the sidebar to a single
