@@ -132,3 +132,52 @@ printf '%s' "$2" > gemini_received.txt
 
         assert claude_output.read_text() == prompt_text
         assert gemini_output.read_text() == prompt_text
+
+    def test_pi_agent_gets_prompt_as_positional_arg(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
+    ):
+        """Pi should receive the prompt as a positional arg, not -p flag."""
+        env = mux_server
+        branch_name = "feature-pi-prompt-positional"
+        window_name = get_window_name(branch_name)
+        prompt_text = "interactive pi prompt"
+
+        # Pi profile: prompt is $1 (positional), NOT -p $2
+        fake_agent_installer.install(
+            "pi",
+            """#!/bin/sh
+set -e
+if [ "$1" = "-p" ]; then
+    echo "ERROR: got -p flag, expected positional arg" > pi_error.txt
+    exit 1
+fi
+printf '%s' "$1" > pi_received.txt
+""",
+        )
+
+        write_workmux_config(
+            mux_repo_path,
+            panes=[{"command": "pi"}],
+        )
+
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            branch_name,
+            extra_args=f"--prompt {shlex.quote(prompt_text)}",
+        )
+
+        agent_output = worktree_path / "pi_received.txt"
+        wait_for_file(
+            env,
+            agent_output,
+            timeout=5.0,
+            window_name=window_name,
+            worktree_path=worktree_path,
+        )
+        assert agent_output.read_text() == prompt_text

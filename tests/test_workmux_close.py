@@ -4,6 +4,7 @@ from .conftest import (
     DEFAULT_WINDOW_PREFIX,
     MuxEnvironment,
     WorkmuxCommandResult,
+    _workmux_env_inline,
     get_scripts_dir,
     get_window_name,
     get_worktree_path,
@@ -38,6 +39,7 @@ def run_workmux_close(
 
     name_arg = name if name else ""
     close_script = (
+        f"{_workmux_env_inline(env)}"
         f"cd {repo_path} && "
         f"{workmux_exe_path} close {name_arg} "
         f"> {stdout_file} 2> {stderr_file}; "
