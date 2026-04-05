@@ -126,6 +126,7 @@ pub struct GroupAddArgs<'a> {
     pub branch: &'a str,
     pub prompt: Option<&'a Prompt>,
     pub background: bool,
+    pub no_fetch: bool,
 }
 
 /// Result from group add
@@ -142,6 +143,7 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
         branch,
         prompt,
         background,
+        no_fetch,
     } = args;
 
     info!(group = group_name, branch = branch, "group:add:start");
@@ -174,6 +176,16 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
     }
     fs::create_dir_all(&ws_dir)
         .with_context(|| format!("Failed to create workspace directory: {}", ws_dir.display()))?;
+
+    // Fetch all repos from remote before creating worktrees (unless --no-fetch)
+    let repo_paths: Vec<PathBuf> = group_config
+        .repos
+        .iter()
+        .map(|r| expand_path(&r.path))
+        .collect();
+    if !no_fetch {
+        fetch_repos_parallel(&repo_paths);
+    }
 
     let mut repo_states = Vec::new();
     let mut errors = Vec::new();
@@ -335,6 +347,54 @@ fn generate_vscode_workspace(state: &GroupState, workspace_dir: &Path) -> Result
     Ok(())
 }
 
+/// Fetch from origin in multiple repos in parallel.
+///
+/// Warns on failures but does not bail -- the user might be offline, and local
+/// state is still usable. Uses `std::thread::scope` for safe parallel spawning.
+fn fetch_repos_parallel(repo_paths: &[PathBuf]) {
+    use crate::spinner;
+
+    let repo_count = repo_paths.len();
+    let fetch_msg = if repo_count == 1 {
+        "Fetching from origin".to_string()
+    } else {
+        format!("Fetching {} repositories from origin", repo_count)
+    };
+
+    let result: Result<Vec<(String, String)>> = spinner::with_spinner(&fetch_msg, || {
+        let failures = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for repo_path in repo_paths {
+                let failures = &failures;
+                s.spawn(move || {
+                    let repo_name = repo_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    if let Err(e) = git::fetch_remote_in("origin", repo_path) {
+                        failures
+                            .lock()
+                            .unwrap()
+                            .push((repo_name.to_string(), format!("{:#}", e)));
+                    }
+                });
+            }
+        });
+        Ok(failures.into_inner().unwrap())
+    });
+
+    match result {
+        Ok(failures) => {
+            for (repo, err) in &failures {
+                eprintln!("Warning: fetch failed for {}: {}", repo, err);
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: fetch failed ({}), using local state", e);
+        }
+    }
+}
+
 /// Create a worktree in a specific repository
 fn create_worktree_in_repo(repo_path: &Path, branch: &str) -> Result<PathBuf> {
     if !repo_path.exists() {
@@ -365,9 +425,15 @@ fn create_worktree_in_repo(repo_path: &Path, branch: &str) -> Result<PathBuf> {
     // Check if branch exists
     let branch_exists = git::branch_exists_in(branch, Some(repo_path))?;
 
-    // Get current branch to use as base
+    // Determine base branch: use origin/<default> when available for freshest starting point
     let base_branch = if !branch_exists {
-        Some(git::get_current_branch_in(repo_path)?)
+        let default_branch = git::get_default_branch_in(Some(repo_path))?;
+        let remote_default = format!("origin/{}", default_branch);
+        if git::branch_exists_in(&remote_default, Some(repo_path))? {
+            Some(remote_default)
+        } else {
+            Some(default_branch)
+        }
     } else {
         None
     };

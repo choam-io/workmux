@@ -439,6 +439,7 @@ pub fn run(
         sandbox_override,
         prompt_file_only,
         layout: layout.as_deref(),
+        no_fetch: setup.no_fetch,
     };
     plan.execute()
 }
@@ -569,6 +570,7 @@ struct CreationPlan<'a> {
     sandbox_override: bool,
     prompt_file_only: bool,
     layout: Option<&'a str>,
+    no_fetch: bool,
 }
 
 impl<'a> CreationPlan<'a> {
@@ -674,6 +676,7 @@ impl<'a> CreationPlan<'a> {
                     agent: spec.agent.as_deref(),
                     is_explicit_name: self.explicit_name.is_some(),
                     prompt_file_only: self.prompt_file_only,
+                    no_fetch: self.no_fetch,
                 },
             )
             .with_context(|| {

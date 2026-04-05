@@ -1141,6 +1141,7 @@ impl App {
                         agent: None,
                         is_explicit_name: false,
                         prompt_file_only: false,
+                        no_fetch: false,
                     },
                 )?;
                 Ok(result.branch_name)
@@ -1196,6 +1197,7 @@ impl App {
                         agent: None,
                         is_explicit_name: false,
                         prompt_file_only: false,
+                        no_fetch: false,
                     },
                 )?;
                 Ok(result.branch_name)

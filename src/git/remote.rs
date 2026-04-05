@@ -34,6 +34,16 @@ pub fn fetch_remote(remote: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fetch updates from the given remote in a specific repository.
+pub fn fetch_remote_in(remote: &str, workdir: &std::path::Path) -> Result<()> {
+    Cmd::new("git")
+        .workdir(workdir)
+        .args(&["fetch", remote])
+        .run()
+        .with_context(|| format!("Failed to fetch from remote '{}' in {}", remote, workdir.display()))?;
+    Ok(())
+}
+
 /// Fetch from remote with prune to update remote-tracking refs
 pub fn fetch_prune() -> Result<()> {
     Cmd::new("git")

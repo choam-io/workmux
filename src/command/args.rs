@@ -58,6 +58,10 @@ pub struct SetupFlags {
     /// Enable sandbox mode even when disabled in config
     #[arg(short = 'S', long)]
     pub sandbox: bool,
+
+    /// Skip fetching from remote before creating the worktree
+    #[arg(long)]
+    pub no_fetch: bool,
 }
 
 #[derive(clap::Args, Debug)]

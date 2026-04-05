@@ -54,6 +54,7 @@ pub fn run_add(
     prompt_file: Option<&std::path::Path>,
     prompt_editor: bool,
     background: bool,
+    no_fetch: bool,
 ) -> Result<()> {
     let config = Config::load(None)?;
 
@@ -71,6 +72,7 @@ pub fn run_add(
             branch,
             prompt: prompt.as_ref(),
             background,
+            no_fetch,
         },
     )?;
 

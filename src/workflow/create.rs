@@ -47,6 +47,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         agent,
         is_explicit_name,
         prompt_file_only,
+        no_fetch,
     } = args;
 
     info!(
@@ -217,6 +218,17 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         branch_exists, create_new, "create:branch detection"
     );
 
+    // Fetch from origin before creating a new branch (unless --no-fetch or --remote,
+    // which has its own fetch). This ensures the base branch is up to date with remote.
+    if create_new && !no_fetch && remote_branch.is_none() {
+        if let Err(e) = spinner::with_spinner("Fetching from origin", || {
+            git::fetch_remote("origin")
+        }) {
+            warn!(error = %e, "create:fetch from origin failed, continuing with local state");
+            eprintln!("Warning: fetch from origin failed ({}), using local state", e);
+        }
+    }
+
     // Determine the base for the new branch
     let base_branch_for_creation = if let Some(remote_spec) = remote_branch {
         let spec = git::parse_remote_branch_spec(remote_spec)?;
@@ -242,10 +254,17 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         Some(remote_ref)
     } else if create_new {
         if let Some(base) = base_branch {
-            // Use the explicitly provided base branch/commit/tag
-            Some(base.to_string())
+            // Use the explicitly provided base branch/commit/tag.
+            // If it looks like a local branch, check if origin/<base> is ahead.
+            let origin_ref = format!("origin/{}", base);
+            if !no_fetch && git::branch_exists(&origin_ref)? {
+                Some(origin_ref)
+            } else {
+                Some(base.to_string())
+            }
         } else {
-            // Default to the current branch when no explicit base was provided
+            // No explicit base: prefer origin/<default> for the freshest starting point,
+            // falling back to the local default branch.
             let current_branch = git::get_current_branch()
                 .context("Failed to determine the current branch to use as the base")?;
             let current_branch = current_branch.trim().to_string();
@@ -257,7 +276,12 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
                 ));
             }
 
-            Some(current_branch)
+            let origin_ref = format!("origin/{}", current_branch);
+            if !no_fetch && git::branch_exists(&origin_ref)? {
+                Some(origin_ref)
+            } else {
+                Some(current_branch)
+            }
         }
     } else {
         None
@@ -513,6 +537,7 @@ pub fn create_with_changes(
             agent: None,
             is_explicit_name: false,
             prompt_file_only: false,
+            no_fetch: false,
         },
     ) {
         Ok(result) => result,

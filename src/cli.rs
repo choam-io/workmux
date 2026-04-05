@@ -802,6 +802,9 @@ enum GroupCommands {
         /// Don't focus the new window
         #[arg(long)]
         background: bool,
+        /// Skip fetching from remote before creating worktrees
+        #[arg(long)]
+        no_fetch: bool,
     },
     /// List all active group workspaces
     List {
@@ -1082,6 +1085,7 @@ pub fn run() -> Result<()> {
                 prompt_file,
                 prompt_editor,
                 background,
+                no_fetch,
             } => command::group::run_add(
                 &group_name,
                 &branch,
@@ -1089,6 +1093,7 @@ pub fn run() -> Result<()> {
                 prompt_file.as_deref(),
                 prompt_editor,
                 background,
+                no_fetch,
             ),
             GroupCommands::Open {
                 group_name,

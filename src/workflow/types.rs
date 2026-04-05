@@ -20,6 +20,8 @@ pub struct CreateArgs<'a> {
     /// When true, the prompt file is written to .workmux/ but not passed to
     /// setup_environment, so validation and agent injection are skipped.
     pub prompt_file_only: bool,
+    /// Skip fetching from remote before creating the worktree.
+    pub no_fetch: bool,
 }
 
 /// Result of creating a worktree
