@@ -428,6 +428,23 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_pi_command_posix() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        let result = rewrite_agent_command(
+            "pi",
+            &prompt_file,
+            &working_dir,
+            Some("pi"),
+            "/bin/zsh",
+            None,
+        );
+        // Pi should use a positional arg (interactive mode), NOT -p (one-shot mode)
+        assert_eq!(result, Some(" pi \"$(cat PROMPT.md)\"".to_string()));
+    }
+
+    #[test]
     fn test_rewrite_kiro_bare_command_posix() {
         let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
         let working_dir = PathBuf::from("/tmp/worktree");

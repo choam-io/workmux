@@ -322,9 +322,10 @@ class TmuxEnvironment(MuxEnvironment):
         tmp_file.close()
         self.socket_path.unlink()
 
-        # Ensure we don't accidentally target user's tmux or WezTerm
+        # Ensure we don't accidentally target user's tmux, WezTerm, or cmux
         self.env.pop("TMUX", None)
         self.env.pop("WEZTERM_PANE", None)
+        self.env.pop("CMUX_WORKSPACE_ID", None)
         self.env["TMUX_CONF"] = "/dev/null"
 
     @property
@@ -334,6 +335,9 @@ class TmuxEnvironment(MuxEnvironment):
     def start_server(self) -> None:
         """Start isolated tmux server with a 'test' session."""
         self.mux_command(["new-session", "-d", "-s", "test"])
+        # Unset CMUX_WORKSPACE_ID in the tmux session environment so workmux
+        # uses the tmux backend instead of cmux when tests run inside cmux.
+        self.mux_command(["set-environment", "-g", "-u", "CMUX_WORKSPACE_ID"])
 
     def stop_server(self) -> None:
         """Kill the tmux server and clean up socket."""
@@ -1482,6 +1486,33 @@ def get_session_name(branch_name: str) -> str:
     return f"{DEFAULT_WINDOW_PREFIX}{handle}"
 
 
+def _workmux_env_preamble(env: MuxEnvironment) -> str:
+    """Return shell preamble that isolates workmux to the test backend.
+
+    Ensures workmux uses the correct multiplexer backend (tmux/wezterm)
+    instead of accidentally targeting the user's cmux or other session.
+    """
+    return (
+        f"export PATH={shlex.quote(env.env['PATH'])}\n"
+        f"export TMPDIR={shlex.quote(env.env.get('TMPDIR', '/tmp'))}\n"
+        f"export HOME={shlex.quote(env.env.get('HOME', ''))}\n"
+        f"export WORKMUX_TEST=1\n"
+        f"unset CMUX_WORKSPACE_ID\n"
+        f"export WORKMUX_BACKEND={env.backend_name}\n"
+    )
+
+
+def _workmux_env_inline(env: MuxEnvironment) -> str:
+    """Return inline env setup for run-shell (semicolon-separated, single line)."""
+    return (
+        f"export PATH={shlex.quote(env.env['PATH'])}; "
+        f"export HOME={shlex.quote(env.env.get('HOME', ''))}; "
+        f"export WORKMUX_TEST=1; "
+        f"unset CMUX_WORKSPACE_ID; "
+        f"export WORKMUX_BACKEND={env.backend_name}; "
+    )
+
+
 def run_workmux_command(
     env: MuxEnvironment,
     workmux_exe_path: Path,
@@ -1532,11 +1563,7 @@ def run_workmux_command(
     # The PATH can be very long in test environments, causing command truncation.
     script_content = f"""#!/bin/sh
 trap 'echo $? > {shlex.quote(str(exit_code_file))}' EXIT
-export PATH={shlex.quote(env.env["PATH"])}
-export TMPDIR={shlex.quote(env.env.get("TMPDIR", "/tmp"))}
-export HOME={shlex.quote(env.env.get("HOME", ""))}
-export WORKMUX_TEST=1
-cd {shlex.quote(str(workdir))}
+{_workmux_env_preamble(env)}cd {shlex.quote(str(workdir))}
 {pipe_cmd}{shlex.quote(str(workmux_exe_path))} {command} > {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}
 """
     script_file.write_text(script_content)
@@ -1736,12 +1763,15 @@ def run_workmux_remove(
     branch_arg = branch_name if branch_name else ""
     input_cmd = f"echo '{user_input}' | " if user_input else ""
 
+    env_prefix = _workmux_env_inline(env)
+
     # If from_window is specified, we need to change to that window's working directory
     if from_window:
         worktree_path = get_worktree_path(
             repo_path, from_window.replace(DEFAULT_WINDOW_PREFIX, "")
         )
         remove_script = (
+            f"{env_prefix}"
             f"cd {worktree_path} && "
             f"{input_cmd}"
             f"{workmux_exe_path} remove {force_flag}{keep_branch_flag}{gone_flag}{all_flag}{branch_arg} "
@@ -1750,6 +1780,7 @@ def run_workmux_remove(
         )
     else:
         remove_script = (
+            f"{env_prefix}"
             f"cd {repo_path} && "
             f"{input_cmd}"
             f"{workmux_exe_path} remove {force_flag}{keep_branch_flag}{gone_flag}{all_flag}{branch_arg} "
@@ -1859,6 +1890,7 @@ def run_workmux_merge(
     editor_script.chmod(0o755)
 
     merge_script = (
+        f"{_workmux_env_inline(env)}"
         f"export GIT_EDITOR={shlex.quote(str(editor_script))} && "
         f"cd {workdir} && "
         f"{workmux_exe_path} merge {flags_str} {branch_arg} "
