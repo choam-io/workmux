@@ -253,7 +253,9 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        dev_env: None,
+        dev_env: group_config.dev_env.as_ref().map(|c| {
+            crate::dev_env::DevEnvState::from_config(c.clone())
+        }),
     };
     state.save(&ws_dir)?;
 
