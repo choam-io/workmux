@@ -35,6 +35,9 @@ pub enum DevEnvConfig {
         /// Machine type (e.g., "standardLinux32gb")
         #[serde(default)]
         machine: Option<String>,
+        /// Automatically attach dev env on `group add`. Default: false.
+        #[serde(default)]
+        auto_attach: bool,
         /// Git branch for the codespace
         #[serde(default)]
         branch: Option<String>,
@@ -66,6 +69,13 @@ pub enum DevEnvConfig {
 }
 
 impl DevEnvConfig {
+    /// Whether auto-attach on group add is enabled.
+    pub fn auto_attach(&self) -> bool {
+        match self {
+            DevEnvConfig::Codespace { auto_attach, .. } => *auto_attach,
+        }
+    }
+
     /// Get the list of remote ports to forward.
     pub fn ports(&self) -> &[u16] {
         match self {
@@ -226,6 +236,7 @@ repo: org/repo
         let config = DevEnvConfig::Codespace {
             repo: "org/repo".to_string(),
             machine: None,
+            auto_attach: false,
             branch: None,
             location: None,
             devcontainer_path: None,
@@ -250,6 +261,7 @@ repo: org/repo
             config: DevEnvConfig::Codespace {
                 repo: "acme-corp/webapp".to_string(),
                 machine: Some("standardLinux32gb".to_string()),
+                auto_attach: false,
                 branch: None,
                 location: None,
                 devcontainer_path: None,

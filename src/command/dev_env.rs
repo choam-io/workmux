@@ -122,6 +122,7 @@ fn run_attach(
         DevEnvConfig::Codespace {
             repo,
             machine,
+            auto_attach: false,
             branch: None,
             location: None,
             devcontainer_path,
@@ -250,8 +251,8 @@ fn run_detach() -> Result<()> {
         codespace::detach(name)?;
     }
 
-    // Clear state
-    state.dev_env = None;
+    // Reset to unattached config state (preserves config for re-attach)
+    state.dev_env = Some(DevEnvState::from_config(dev_env.config.clone()));
     state.save(&ws_dir)?;
 
     println!("✓ Dev environment detached");
@@ -405,6 +406,10 @@ pub fn auto_attach(
         Some(c) => c.clone(),
         None => return Ok(()), // No dev_env in config, nothing to do
     };
+
+    if !config.auto_attach() {
+        return Ok(()); // dev_env present but auto-attach not requested
+    }
 
     println!("Attaching dev environment...");
 
