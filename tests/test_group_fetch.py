@@ -35,6 +35,10 @@ def create_repo_with_remote(env: MuxEnvironment, name: str) -> tuple[Path, Path]
     remote_path = env.tmp_path / f"remotes/{name}.git"
     remote_path.mkdir(parents=True)
     env.run_command(["git", "init", "--bare"], cwd=remote_path)
+    # Set the bare remote's HEAD to main so clones default to main
+    env.run_command(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=remote_path
+    )
     env.run_command(
         ["git", "remote", "add", "origin", str(remote_path)], cwd=repo_path
     )

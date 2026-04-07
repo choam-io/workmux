@@ -81,6 +81,9 @@ pub fn run_add(
         result.workspace_dir.display()
     );
     println!("  Repositories: {}", result.repos_created);
+    if !result.state.dirs.is_empty() {
+        println!("  Linked dirs: {}", result.state.dirs.len());
+    }
     println!("  Branch: {}", result.state.branch);
 
     Ok(())
@@ -189,6 +192,13 @@ pub fn run_status(
                     "branch": r.branch,
                 })
             }).collect::<Vec<_>>(),
+            "dirs": status.state.dirs.iter().map(|d| {
+                serde_json::json!({
+                    "name": d.symlink_name,
+                    "path": d.path.to_string_lossy(),
+                    "exists": d.path.exists(),
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&json_output)?);
         return Ok(());
@@ -223,6 +233,22 @@ pub fn run_status(
         .modify(tabled::settings::object::Columns::new(0..4), Padding::new(0, 2, 0, 0));
 
     println!("{table}");
+
+    // Show linked directories if any
+    if !status.state.dirs.is_empty() {
+        println!();
+        println!("Linked directories:");
+        for dir in &status.state.dirs {
+            let exists = dir.path.exists();
+            println!(
+                "  {} {} → {}",
+                if exists { "✓" } else { "✗" },
+                dir.symlink_name,
+                dir.path.display()
+            );
+        }
+    }
+
     Ok(())
 }
 

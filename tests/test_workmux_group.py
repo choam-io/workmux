@@ -360,3 +360,246 @@ class GroupTestEnv:
             capture_output=True,
             text=True,
         )
+
+
+class TestGroupDirs:
+    """Tests for non-git directory linking in groups."""
+
+    def test_group_add_links_existing_dirs(self, test_env):
+        """Group add symlinks non-git directories into the workspace."""
+        repo = test_env.create_repo("repo1")
+
+        # Create plain directories (not git repos)
+        brain_dir = test_env.tmp_path / "brain"
+        brain_dir.mkdir()
+        (brain_dir / "INDEX.md").write_text("# Brain")
+
+        notes_dir = test_env.tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "daily.md").write_text("# Notes")
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                            "dirs": [str(brain_dir), str(notes_dir)],
+                        }
+                    }
+                }
+            )
+        )
+
+        result = test_env.run_workmux("group", "add", "test", "feat/dirs", "--background")
+        assert result.returncode == 0
+        assert "Linked dirs: 2" in result.stdout
+
+        ws_dir = test_env.groups_dir / "test--feat-dirs"
+
+        # Verify dir symlinks exist and point to originals
+        brain_link = ws_dir / "brain"
+        assert brain_link.is_symlink()
+        assert (brain_link / "INDEX.md").read_text() == "# Brain"
+
+        notes_link = ws_dir / "notes"
+        assert notes_link.is_symlink()
+        assert (notes_link / "daily.md").read_text() == "# Notes"
+
+        # Verify state file tracks dirs
+        state = yaml.safe_load((ws_dir / ".workmux-group.yaml").read_text())
+        assert len(state["dirs"]) == 2
+        dir_names = [d["symlink_name"] for d in state["dirs"]]
+        assert "brain" in dir_names
+        assert "notes" in dir_names
+
+    def test_group_add_skips_missing_dirs(self, test_env):
+        """Group add silently skips directories that don't exist."""
+        repo = test_env.create_repo("repo1")
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                            "dirs": ["/nonexistent/path/brain"],
+                        }
+                    }
+                }
+            )
+        )
+
+        result = test_env.run_workmux("group", "add", "test", "feat/missing-dir", "--background")
+        assert result.returncode == 0
+
+        ws_dir = test_env.groups_dir / "test--feat-missing-dir"
+        assert ws_dir.exists()
+
+        # Dir should not be linked
+        assert not (ws_dir / "brain").exists()
+
+        # State should have empty dirs
+        state = yaml.safe_load((ws_dir / ".workmux-group.yaml").read_text())
+        assert state.get("dirs", []) == [] or "dirs" not in state
+
+    def test_group_add_no_dirs_field(self, test_env):
+        """Group add works fine without dirs field (backward compat)."""
+        repo = test_env.create_repo("repo1")
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                        }
+                    }
+                }
+            )
+        )
+
+        result = test_env.run_workmux("group", "add", "test", "feat/no-dirs", "--background")
+        assert result.returncode == 0
+        assert "Linked dirs" not in result.stdout
+
+    def test_group_remove_cleans_up_dir_symlinks(self, test_env):
+        """Group remove cleans up dir symlinks along with the workspace."""
+        repo = test_env.create_repo("repo1")
+
+        brain_dir = test_env.tmp_path / "brain"
+        brain_dir.mkdir()
+        (brain_dir / "INDEX.md").write_text("# Brain")
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                            "dirs": [str(brain_dir)],
+                        }
+                    }
+                }
+            )
+        )
+
+        test_env.run_workmux("group", "add", "test", "feat/rm-dirs", "--background")
+        ws_dir = test_env.groups_dir / "test--feat-rm-dirs"
+        assert (ws_dir / "brain").is_symlink()
+
+        result = test_env.run_workmux("group", "remove", "test", "feat/rm-dirs", "-f")
+        assert result.returncode == 0
+
+        # Workspace gone
+        assert not ws_dir.exists()
+        # Original dir untouched
+        assert brain_dir.exists()
+        assert (brain_dir / "INDEX.md").read_text() == "# Brain"
+
+    def test_group_status_shows_dirs(self, test_env):
+        """Group status includes linked directories."""
+        repo = test_env.create_repo("repo1")
+
+        brain_dir = test_env.tmp_path / "brain"
+        brain_dir.mkdir()
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                            "dirs": [str(brain_dir)],
+                        }
+                    }
+                }
+            )
+        )
+
+        test_env.run_workmux("group", "add", "test", "feat/status-dirs", "--background")
+
+        result = test_env.run_workmux("group", "status", "test", "feat/status-dirs")
+        assert result.returncode == 0
+        assert "Linked directories:" in result.stdout
+        assert "brain" in result.stdout
+
+    def test_group_status_json_includes_dirs(self, test_env):
+        """Group status --json includes dirs array."""
+        repo = test_env.create_repo("repo1")
+
+        brain_dir = test_env.tmp_path / "brain"
+        brain_dir.mkdir()
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                            "dirs": [str(brain_dir)],
+                        }
+                    }
+                }
+            )
+        )
+
+        test_env.run_workmux("group", "add", "test", "feat/json-dirs", "--background")
+
+        result = test_env.run_workmux("group", "status", "test", "feat/json-dirs", "--json")
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert len(data["dirs"]) == 1
+        assert data["dirs"][0]["name"] == "brain"
+        assert data["dirs"][0]["exists"] is True
+
+    def test_group_add_dir_name_conflict_with_repo(self, test_env):
+        """Dir with same basename as a repo is skipped to avoid symlink conflict."""
+        repo = test_env.create_repo("myrepo")
+
+        # Create a dir with the same name as the repo
+        conflict_dir = test_env.tmp_path / "myrepo_dir"
+        conflict_dir.mkdir()
+        # Rename to match -- we can't have two things named "myrepo"
+        # Actually the repo symlink uses the repo dir name, and the dir symlink uses the dir basename
+        # So let's create a dir literally named "myrepo" elsewhere
+        myrepo_dir = test_env.tmp_path / "other" / "myrepo"
+        myrepo_dir.mkdir(parents=True)
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {
+                            "repos": [{"path": str(repo)}],
+                            "dirs": [str(myrepo_dir)],
+                        }
+                    }
+                }
+            )
+        )
+
+        result = test_env.run_workmux("group", "add", "test", "feat/conflict", "--background")
+        assert result.returncode == 0
+
+        ws_dir = test_env.groups_dir / "test--feat-conflict"
+        # The repo symlink should exist (created first)
+        assert (ws_dir / "myrepo").is_symlink()
+
+        # The dir should be skipped (conflict)
+        state = yaml.safe_load((ws_dir / ".workmux-group.yaml").read_text())
+        assert len(state.get("dirs", [])) == 0

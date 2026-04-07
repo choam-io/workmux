@@ -258,6 +258,10 @@ pub struct GroupRepoConfig {
 pub struct GroupConfig {
     /// List of repositories in this group
     pub repos: Vec<GroupRepoConfig>,
+    /// Non-git directories to symlink into the workspace (e.g. ~/brain, ~/Documents/notes).
+    /// These are convenience links -- skipped silently if the directory doesn't exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirs: Option<Vec<String>>,
     /// Default ship strategy for all repos in this group
     #[serde(default)]
     pub ship: ShipStrategy,

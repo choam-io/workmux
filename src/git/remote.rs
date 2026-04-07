@@ -44,6 +44,34 @@ pub fn fetch_remote_in(remote: &str, workdir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Fetch only the default branch from a remote in a specific repository.
+///
+/// Much faster than a full fetch on repos with many branches/tags. Resolves
+/// the default branch from local state (origin/HEAD or main/master fallback)
+/// before fetching. Uses an explicit refspec to ensure the remote tracking
+/// ref is updated.
+pub fn fetch_default_branch_in(remote: &str, workdir: &std::path::Path) -> Result<()> {
+    let default_branch = super::branch::get_default_branch_in(Some(workdir))
+        .unwrap_or_else(|_| "main".to_string());
+
+    let refspec = format!(
+        "+refs/heads/{}:refs/remotes/{}/{}",
+        default_branch, remote, default_branch
+    );
+
+    Cmd::new("git")
+        .workdir(workdir)
+        .args(&["fetch", remote, &refspec])
+        .run()
+        .with_context(|| {
+            format!(
+                "Failed to fetch '{}' from remote '{}' in {}",
+                default_branch, remote, workdir.display()
+            )
+        })?;
+    Ok(())
+}
+
 /// Fetch from remote with prune to update remote-tracking refs
 pub fn fetch_prune() -> Result<()> {
     Cmd::new("git")
