@@ -37,6 +37,15 @@ pub struct GroupRepoState {
     pub ship: ShipStrategy,
 }
 
+/// State for a non-git directory symlinked into a group workspace
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupDirState {
+    /// Absolute path to the directory on the host
+    pub path: PathBuf,
+    /// Symlink name in workspace (directory basename)
+    pub symlink_name: String,
+}
+
 /// Persisted state for a group workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupState {
@@ -52,6 +61,10 @@ pub struct GroupState {
     pub context: Option<String>,
     /// State for each repository
     pub repos: Vec<GroupRepoState>,
+    /// Non-git directories symlinked into the workspace.
+    /// Each entry is the expanded absolute path to the directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirs: Vec<GroupDirState>,
     /// Unix timestamp when created
     pub created_at: u64,
     /// Dev environment state (codespace + tunnels + port mappings)
@@ -242,6 +255,9 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
         );
     }
 
+    // Symlink non-git directories into the workspace
+    let dir_states = link_dirs_into_workspace(group_config.dirs.as_deref(), &ws_dir);
+
     // Create state
     let mut state = GroupState {
         group_name: group_name.to_string(),
@@ -249,6 +265,7 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
         ship: group_config.ship,
         context: group_config.context.clone(),
         repos: repo_states.clone(),
+        dirs: dir_states,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -322,7 +339,7 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
 /// The file lists each repo symlink as a workspace folder so VS Code (and
 /// compatible editors) can open the entire group as a multi-root workspace.
 fn generate_vscode_workspace(state: &GroupState, workspace_dir: &Path) -> Result<()> {
-    let folders: Vec<serde_json::Value> = state
+    let mut folders: Vec<serde_json::Value> = state
         .repos
         .iter()
         .map(|r| {
@@ -332,6 +349,14 @@ fn generate_vscode_workspace(state: &GroupState, workspace_dir: &Path) -> Result
             })
         })
         .collect();
+
+    // Include linked directories as workspace folders
+    for dir in &state.dirs {
+        folders.push(serde_json::json!({
+            "path": dir.symlink_name,
+            "name": dir.symlink_name,
+        }));
+    }
 
     let workspace = serde_json::json!({
         "folders": folders,
@@ -373,7 +398,7 @@ fn fetch_repos_parallel(repo_paths: &[PathBuf]) {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown");
-                    if let Err(e) = git::fetch_remote_in("origin", repo_path) {
+                    if let Err(e) = git::fetch_default_branch_in("origin", repo_path) {
                         failures
                             .lock()
                             .unwrap()
@@ -395,6 +420,54 @@ fn fetch_repos_parallel(repo_paths: &[PathBuf]) {
             eprintln!("Warning: fetch failed ({}), using local state", e);
         }
     }
+}
+
+/// Symlink non-git directories into the workspace.
+///
+/// Each configured dir path is expanded and symlinked by its basename.
+/// Missing directories are silently skipped with a warning.
+fn link_dirs_into_workspace(dirs: Option<&[String]>, ws_dir: &Path) -> Vec<GroupDirState> {
+    let mut dir_states = Vec::new();
+    let dirs = match dirs {
+        Some(d) => d,
+        None => return dir_states,
+    };
+
+    for dir_path_str in dirs {
+        let dir_path = expand_path(dir_path_str);
+        let dir_name = dir_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        if !dir_path.exists() {
+            warn!(path = %dir_path.display(), "group:add:dir not found, skipping");
+            eprintln!("Warning: directory not found, skipping: {}", dir_path.display());
+            continue;
+        }
+
+        let symlink_path = ws_dir.join(&dir_name);
+        if symlink_path.exists() {
+            warn!(name = dir_name, "group:add:symlink name conflict for dir, skipping");
+            eprintln!("Warning: symlink '{}' already exists, skipping dir: {}", dir_name, dir_path.display());
+            continue;
+        }
+
+        if let Err(e) = std::os::unix::fs::symlink(&dir_path, &symlink_path) {
+            warn!(dir = dir_name, error = %e, "group:add:failed to symlink dir");
+            eprintln!("Warning: failed to symlink dir '{}': {}", dir_name, e);
+            continue;
+        }
+
+        debug!(dir = %dir_path.display(), name = dir_name, "group:add:linked dir");
+        dir_states.push(GroupDirState {
+            path: dir_path,
+            symlink_name: dir_name,
+        });
+    }
+
+    dir_states
 }
 
 /// Create a worktree in a specific repository
@@ -902,6 +975,21 @@ pub fn fork(config: &Config, args: GroupForkArgs) -> Result<GroupForkResult> {
         );
     }
 
+    // Re-link non-git directories from source state
+    let mut dir_states = Vec::new();
+    for dir_state in &source_state.dirs {
+        let symlink_path = new_ws_dir.join(&dir_state.symlink_name);
+        if !dir_state.path.exists() {
+            warn!(path = %dir_state.path.display(), "group:fork:dir not found, skipping");
+            continue;
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&dir_state.path, &symlink_path) {
+            warn!(dir = dir_state.symlink_name, error = %e, "group:fork:failed to symlink dir");
+            continue;
+        }
+        dir_states.push(dir_state.clone());
+    }
+
     // Create state
     let mut state = GroupState {
         group_name: group_name.to_string(),
@@ -909,6 +997,7 @@ pub fn fork(config: &Config, args: GroupForkArgs) -> Result<GroupForkResult> {
         ship: source_state.ship,
         context: source_state.context.clone(),
         repos: repo_states.clone(),
+        dirs: dir_states,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1622,6 +1711,7 @@ mod tests {
                 ship: ShipStrategy::default(),
             }],
             created_at: 1234567890,
+            dirs: vec![],
             dev_env: None,
         };
 
@@ -1668,6 +1758,7 @@ mod tests {
                 },
             ],
             created_at: 1234567890,
+            dirs: vec![],
             dev_env: None,
         };
 
@@ -1738,6 +1829,7 @@ mod tests {
                 },
             ],
             created_at: 9999999999,
+            dirs: vec![],
             dev_env: None,
         };
 
@@ -1790,6 +1882,7 @@ created_at: 1234567890
                 ship: ShipStrategy::Mq,
             }],
             created_at: 1000000000,
+            dirs: vec![],
             dev_env: None,
         };
 
@@ -1811,6 +1904,7 @@ created_at: 1234567890
             context: Some(context.clone()),
             repos: vec![],
             created_at: 0,
+            dirs: vec![],
             dev_env: None,
         };
 
