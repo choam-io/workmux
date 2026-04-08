@@ -119,6 +119,37 @@ class TestGroupAdd:
         assert result2.returncode != 0
         assert "already exists" in result2.stderr
 
+    def test_group_add_recovers_partial_workspace(self, test_env):
+        """Group add auto-cleans partial workspace (dir exists, no state file)."""
+        repo = test_env.create_repo("repo1")
+
+        config = test_env.global_config_path
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            yaml.dump(
+                {
+                    "groups": {
+                        "test": {"repos": [{"path": str(repo)}]}
+                    }
+                }
+            )
+        )
+
+        # Simulate interrupted add: create workspace dir without state file
+        ws_dir = test_env.groups_dir / "test--feat-partial"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "leftover.txt").write_text("stale")
+
+        # add should recover and succeed
+        result = test_env.run_workmux("group", "add", "test", "feat/partial", "--background")
+        assert result.returncode == 0
+        assert "Created group workspace" in result.stdout
+
+        # State file should now exist
+        assert (ws_dir / ".workmux-group.yaml").exists()
+        # Stale file should be gone (dir was wiped)
+        assert not (ws_dir / "leftover.txt").exists()
+
     def test_group_add_unknown_group_fails(self, test_env):
         """Group add fails with helpful error for unknown group."""
         config = test_env.global_config_path
@@ -276,6 +307,17 @@ class TestGroupRemove:
 
         result = test_env.run_workmux("group", "remove", "test", "feat/dirty", "-f")
         assert result.returncode == 0
+
+    def test_group_remove_partial_workspace_no_state_file(self, test_env):
+        """Group remove cleans up a partial workspace with no state file."""
+        # Simulate interrupted add: directory exists but no .workmux-group.yaml
+        ws_dir = test_env.groups_dir / "test--feat-orphan"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "leftover.txt").write_text("stale")
+
+        result = test_env.run_workmux("group", "remove", "test", "feat/orphan", "-f")
+        assert result.returncode == 0
+        assert not ws_dir.exists()
 
 
 # =============================================================================

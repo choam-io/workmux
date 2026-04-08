@@ -180,12 +180,25 @@ pub fn add(config: &Config, args: GroupAddArgs) -> Result<GroupAddResult> {
     // Create workspace directory
     let ws_dir = workspace_dir(group_name, branch)?;
     if ws_dir.exists() {
-        bail!(
-            "Group workspace already exists: {}\nUse 'workmux group remove {} {}' to clean up first.",
-            ws_dir.display(),
-            group_name,
-            branch
-        );
+        let state_path = ws_dir.join(STATE_FILE);
+        if !state_path.exists() {
+            // Partial workspace from interrupted add -- clean up and continue
+            warn!(
+                group = group_name,
+                branch = branch,
+                "group:add:removing partial workspace (no state file)"
+            );
+            fs::remove_dir_all(&ws_dir).with_context(|| {
+                format!("Failed to remove partial workspace: {}", ws_dir.display())
+            })?;
+        } else {
+            bail!(
+                "Group workspace already exists: {}\nUse 'workmux group remove {} {}' to clean up first.",
+                ws_dir.display(),
+                group_name,
+                branch
+            );
+        }
     }
     fs::create_dir_all(&ws_dir)
         .with_context(|| format!("Failed to create workspace directory: {}", ws_dir.display()))?;
@@ -928,13 +941,25 @@ pub fn fork(config: &Config, args: GroupForkArgs) -> Result<GroupForkResult> {
     // Create new workspace directory
     let new_ws_dir = workspace_dir(group_name, new_branch)?;
     if new_ws_dir.exists() {
-        bail!(
-            "Target group workspace already exists: {}\n\
-             Use 'workmux group remove {} {}' to clean up first.",
-            new_ws_dir.display(),
-            group_name,
-            new_branch
-        );
+        let state_path = new_ws_dir.join(STATE_FILE);
+        if !state_path.exists() {
+            warn!(
+                group = group_name,
+                branch = new_branch,
+                "group:fork:removing partial workspace (no state file)"
+            );
+            fs::remove_dir_all(&new_ws_dir).with_context(|| {
+                format!("Failed to remove partial workspace: {}", new_ws_dir.display())
+            })?;
+        } else {
+            bail!(
+                "Target group workspace already exists: {}\n\
+                 Use 'workmux group remove {} {}' to clean up first.",
+                new_ws_dir.display(),
+                group_name,
+                new_branch
+            );
+        }
     }
     fs::create_dir_all(&new_ws_dir)
         .with_context(|| format!("Failed to create workspace directory: {}", new_ws_dir.display()))?;
@@ -1558,7 +1583,35 @@ fn remove_internal(group_name: &str, branch: &str, force: bool) -> Result<()> {
         );
     }
 
-    let state = GroupState::load(&ws_dir)?;
+    let state = match GroupState::load(&ws_dir) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            // If the state file is missing, this is a partial/broken workspace.
+            // We can still clean up the directory itself.
+            let state_path = ws_dir.join(STATE_FILE);
+            if !state_path.exists() {
+                warn!(
+                    group = group_name,
+                    branch = branch,
+                    "group:remove:no state file, removing directory only"
+                );
+                fs::remove_dir_all(&ws_dir).with_context(|| {
+                    format!("Failed to remove workspace directory: {}", ws_dir.display())
+                })?;
+                info!(
+                    group = group_name,
+                    branch = branch,
+                    "group:remove:complete (partial cleanup)"
+                );
+                return Ok(());
+            }
+            return Err(e).context(format!(
+                "Failed to read group state from {}",
+                state_path.display()
+            ));
+        }
+    };
+    let state = state.unwrap();
     info!(
         group = group_name,
         branch = branch,
@@ -1911,5 +1964,33 @@ created_at: 1234567890
         state.save(tmp.path()).unwrap();
         let loaded = GroupState::load(tmp.path()).unwrap();
         assert_eq!(loaded.context.as_deref(), Some(context.as_str()));
+    }
+
+    #[test]
+    fn test_remove_partial_workspace_no_state_file() {
+        // Simulate an interrupted `add`: directory exists but no state file.
+        // `remove` should clean up the directory without error.
+        let tmp = TempDir::new().unwrap();
+        let groups_dir = tmp.path().join("groups");
+        let ws_dir = groups_dir.join("mygroup--mybranch");
+        fs::create_dir_all(&ws_dir).unwrap();
+        // Put a stale file in there to prove it gets cleaned
+        fs::write(ws_dir.join("leftover.txt"), "stale").unwrap();
+
+        // We can't call remove() directly because it derives ws_dir from
+        // groups_dir() which uses a hardcoded path. Instead, test the
+        // core logic: GroupState::load fails, state file missing -> rm dir.
+        assert!(GroupState::load(&ws_dir).is_err());
+        assert!(!ws_dir.join(STATE_FILE).exists());
+
+        // Simulate what remove_internal now does for this case
+        fs::remove_dir_all(&ws_dir).unwrap();
+        assert!(!ws_dir.exists());
+    }
+
+    #[test]
+    fn test_group_state_load_missing_file_is_error() {
+        let tmp = TempDir::new().unwrap();
+        assert!(GroupState::load(tmp.path()).is_err());
     }
 }
